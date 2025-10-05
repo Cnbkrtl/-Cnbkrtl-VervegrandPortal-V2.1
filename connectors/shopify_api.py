@@ -1,0 +1,1130 @@
+# connectors/shopify_api.py (Rate Limit Geliştirilmiş)
+
+import requests
+import time
+import json
+import logging
+from datetime import datetime, timedelta
+
+class ShopifyAPI:
+    """Shopify Admin API ile iletişimi yöneten sınıf."""
+    def __init__(self, store_url, access_token, api_version='2024-10'): # api_version parametresi burada ekli olmalı
+        if not store_url: raise ValueError("Shopify Mağaza URL'si boş olamaz.")
+        if not access_token: raise ValueError("Shopify Erişim Token'ı boş olamaz.")
+        
+        self.store_url = store_url if store_url.startswith('http') else f"https://{store_url.strip()}"
+        self.access_token = access_token
+        self.api_version = api_version # Gelen versiyonu kullan
+        self.graphql_url = f"{self.store_url}/admin/api/{self.api_version}/graphql.json" # URL'yi dinamik hale getir
+        self.rest_api_version = self.api_version
+        self.headers = {
+            'X-Shopify-Access-Token': access_token,
+            'Content-Type': 'application/json',
+            'User-Agent': 'Sentos-Sync-Python/Modular-v1.0'
+        }
+        self.product_cache = {}
+        self.location_id = None
+        
+        # Geri kalan kodlar aynı
+        self.last_request_time = 0
+        self.min_request_interval = 0.4
+        self.request_count = 0
+        self.window_start = time.time()
+        self.max_requests_per_minute = 40
+        self.burst_tokens = 10
+        self.current_tokens = 10
+
+    def _rate_limit_wait(self):
+        """
+        ✅ Geliştirilmiş Rate Limiter - Shopify 2024-10 API için optimize
+        - Token bucket algoritması
+        - Adaptive throttling
+        - Burst protection
+        """
+        current_time = time.time()
+    
+        # Token bucket: Her saniye token kazanılır
+        elapsed = current_time - self.last_request_time
+        tokens_to_add = elapsed * (self.max_requests_per_minute / 60.0)
+        self.current_tokens = min(self.burst_tokens, self.current_tokens + tokens_to_add)
+    
+        # Eğer yeterli token varsa, isteği yap
+        if self.current_tokens >= 1:
+            self.current_tokens -= 1
+            self.last_request_time = current_time
+            return
+    
+        # Token yetersiz: Bekleme süresi hesapla
+        wait_time = (1 - self.current_tokens) / (self.max_requests_per_minute / 60.0)
+        
+        # ✅ Adaptive Throttling: Eğer sürekli bekleniyorsa, rate'i azalt
+        if wait_time > 2.0:  # 2 saniyeden fazla bekleme gerektiriyorsa
+            wait_time = min(wait_time * 1.2, 5.0)  # Maksimum 5 saniye
+            logging.warning(f"⚠️ Adaptive throttling aktif: {wait_time:.2f}s bekleniyor")
+        
+        time.sleep(wait_time)
+        self.last_request_time = time.time()
+        self.current_tokens = 0
+        
+        # ✅ Bekleme sonrası debug log
+        logging.debug(f"🔄 Rate limit beklendi: {wait_time:.2f}s | Tokens: {self.current_tokens:.1f}/{self.burst_tokens}")
+
+    def _make_request(self, method, endpoint, data=None, is_graphql=False, headers=None, files=None):
+        self._rate_limit_wait()
+        
+        req_headers = headers if headers is not None else self.headers
+        try:
+            if not is_graphql and not endpoint.startswith('http'):
+                # ✅ REST API endpoint'lerde de 2024-10 sürümünü kullan
+                url = f"{self.store_url}/admin/api/{self.rest_api_version}/{endpoint}"
+            else:
+                url = endpoint if endpoint.startswith('http') else self.graphql_url
+            
+            response = requests.request(method, url, headers=req_headers, 
+                                        json=data if isinstance(data, dict) else None, 
+                                        data=data if isinstance(data, bytes) else None,
+                                        files=files, timeout=90)
+            response.raise_for_status()
+            if response.content and 'application/json' in response.headers.get('Content-Type', ''):
+                return response.json()
+            return response
+        except requests.exceptions.RequestException as e:
+            error_content = e.response.text if e.response else "No response"
+            logging.error(f"Shopify API Bağlantı Hatası ({url}): {e} - Response: {error_content}")
+            raise e
+
+    def execute_graphql(self, query, variables=None):
+        """GraphQL sorgusunu çalıştırır - gelişmiş hata yönetimi ile."""
+        payload = {'query': query, 'variables': variables or {}}
+        max_retries = 8
+        retry_delay = 2
+        
+        # Debug için sorgu bilgilerini logla
+        logging.debug(f"GraphQL Query: {query[:100]}...")
+        if variables:
+            logging.debug(f"GraphQL Variables: {json.dumps(variables, indent=2)[:200]}...")
+            
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(self.graphql_url, headers=self.headers, json=payload, timeout=90)
+                response.raise_for_status()
+                response_data = response.json()
+                
+                if "errors" in response_data:
+                    errors = response_data.get("errors", [])
+                    
+                    # Throttling kontrolü
+                    is_throttled = any(
+                        err.get('extensions', {}).get('code') == 'THROTTLED' 
+                        for err in errors
+                    )
+                    if is_throttled and attempt < max_retries - 1:
+                        wait_time = retry_delay * (2 ** attempt)
+                        logging.warning(f"GraphQL Throttled! {wait_time} saniye beklenip tekrar denenecek... (Deneme {attempt + 1}/{max_retries})")
+                        time.sleep(wait_time)
+                        continue
+                    
+                    # Hata detaylarını logla
+                    logging.error("GraphQL Hatası Detayları:")
+                    logging.error(f"Query: {query}")
+                    if variables:
+                        logging.error(f"Variables: {json.dumps(variables, indent=2)}")
+                    logging.error(f"Errors: {json.dumps(errors, indent=2)}")
+                    
+                    # Hata mesajlarını topla
+                    error_messages = []
+                    for err in errors:
+                        msg = err.get('message', 'Bilinmeyen GraphQL hatası')
+                        locations = err.get('locations', [])
+                        path = err.get('path', [])
+                        
+                        error_detail = msg
+                        if locations:
+                            error_detail += f" (Satır: {locations[0].get('line', '?')})"
+                        if path:
+                            error_detail += f" (Alan: {'.'.join(map(str, path))})"
+                            
+                        error_messages.append(error_detail)
+                    
+                    raise Exception(f"GraphQL Error: {'; '.join(error_messages)}")
+
+                return response_data.get("data", {})
+            except requests.exceptions.HTTPError as e:
+                if e.response and e.response.status_code == 429 and attempt < max_retries - 1:
+                    wait_time = retry_delay * (2 ** attempt)
+                    logging.warning(f"HTTP 429 Rate Limit! {wait_time} saniye beklenip tekrar denenecek...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logging.error(f"API bağlantı hatası: {e}")
+                    raise e
+            except requests.exceptions.RequestException as e:
+                 logging.error(f"API bağlantı hatası: {e}. Bu hata için tekrar deneme yapılmıyor.")
+                 raise e
+        raise Exception(f"API isteği {max_retries} denemenin ardından başarısız oldu.")
+
+    def find_customer_by_email(self, email):
+        """YENİ: Verilen e-posta ile müşteri arar."""
+        query = """
+        query($email: String!) {
+          customers(first: 1, query: $email) {
+            edges {
+              node {
+                id
+              }
+            }
+          }
+        }
+        """
+        result = self.execute_graphql(query, {"email": f"email:{email}"})
+        edges = result.get('customers', {}).get('edges', [])
+        return edges[0]['node']['id'] if edges else None
+
+    def create_customer(self, customer_data):
+        """YENİ: Yeni bir müşteri oluşturur."""
+        mutation = """
+        mutation customerCreate($input: CustomerInput!) {
+          customerCreate(input: $input) {
+            customer {
+              id
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+        """
+        input_data = {
+            "firstName": customer_data.get('firstName'),
+            "lastName": customer_data.get('lastName'),
+            "email": customer_data.get('email'),
+            "phone": customer_data.get('phone')
+        }
+        result = self.execute_graphql(mutation, {"input": input_data})
+        if errors := result.get('customerCreate', {}).get('userErrors', []):
+            raise Exception(f"Müşteri oluşturma hatası: {errors}")
+        return result.get('customerCreate', {}).get('customer', {}).get('id')
+
+    def find_variant_id_by_sku(self, sku):
+        """YENİ: Verilen SKU ile ürün varyantı arar."""
+        query = """
+        query($sku: String!) {
+          productVariants(first: 1, query: $sku) {
+            edges {
+              node {
+                id
+              }
+            }
+          }
+        }
+        """
+        result = self.execute_graphql(query, {"sku": f"sku:{sku}"})
+        edges = result.get('productVariants', {}).get('edges', [])
+        return edges[0]['node']['id'] if edges else None
+
+    def get_orders_by_date_range(self, start_date_iso, end_date_iso):
+        all_orders = []
+        # Simplified query first - test basic order fields
+        query = """
+        query getOrders($cursor: String, $filter_query: String!) {
+          orders(first: 10, after: $cursor, query: $filter_query, sortKey: CREATED_AT, reverse: true) {
+            pageInfo { hasNextPage, endCursor }
+            edges {
+              node {
+                id
+                name
+                createdAt
+                displayFinancialStatus
+                displayFulfillmentStatus
+                note
+                tags
+                customer { 
+                  id
+                  firstName
+                  lastName
+                  email
+                  phone
+                  numberOfOrders 
+                }
+                
+                # Ödeme yöntemi (gateway names)
+                paymentGatewayNames
+                
+                # Kargo bilgileri
+                shippingLine {
+                  title
+                  code
+                  source
+                  originalPriceSet { shopMoney { amount currencyCode } }
+                }
+                
+                # İndirim uygulamaları
+                discountApplications(first: 10) {
+                  edges {
+                    node {
+                      ... on DiscountCodeApplication {
+                        code
+                        value {
+                          ... on MoneyV2 {
+                            amount
+                            currencyCode
+                          }
+                          ... on PricingPercentageValue {
+                            percentage
+                          }
+                        }
+                      }
+                      ... on ManualDiscountApplication {
+                        title
+                        description
+                        value {
+                          ... on MoneyV2 {
+                            amount
+                            currencyCode
+                          }
+                          ... on PricingPercentageValue {
+                            percentage
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                
+                # Özel alanlar
+                customAttributes {
+                  key
+                  value
+                }
+                
+                currentSubtotalPriceSet { shopMoney { amount currencyCode } }
+                currentTotalPriceSet { shopMoney { amount currencyCode } }
+                totalPriceSet { shopMoney { amount currencyCode } }
+                originalTotalPriceSet { shopMoney { amount currencyCode } }
+                totalShippingPriceSet { shopMoney { amount currencyCode } }
+                totalTaxSet { shopMoney { amount currencyCode } }
+                totalDiscountsSet { shopMoney { amount currencyCode } }
+
+                lineItems(first: 50) {
+                  nodes {
+                    id
+                    title
+                    quantity
+                    variant { 
+                      id
+                      sku
+                      title 
+                    }
+                    originalUnitPriceSet { shopMoney { amount currencyCode } }
+                    discountedUnitPriceSet { shopMoney { amount currencyCode } }
+                    taxable # Vergiye tabi olup olmadığını belirtir
+                    taxLines { # Satıra uygulanan vergilerin listesi
+                      priceSet { shopMoney { amount, currencyCode } }
+                      ratePercentage
+                      title
+                    }
+                    # Özel alanlar (line item düzeyinde)
+                    customAttributes {
+                      key
+                      value
+                    }
+                  }
+                }
+                
+                # Siparişin genel vergi dökümü
+                taxLines {
+                  priceSet { shopMoney { amount, currencyCode } }
+                  ratePercentage
+                  title
+                }
+                
+                shippingAddress {
+                  name
+                  address1
+                  address2
+                  city
+                  province
+                  provinceCode
+                  zip
+                  country
+                  countryCodeV2
+                  phone
+                }
+              }
+            }
+          }
+        }
+        """
+        variables = {"cursor": None, "filter_query": f"created_at:>='{start_date_iso}' AND created_at:<='{end_date_iso}'"}
+        
+        while True:
+            data = self.execute_graphql(query, variables)
+            if not data: break
+            orders_data = data.get("orders", {})
+            for edge in orders_data.get("edges", []):
+                all_orders.append(edge["node"])
+            
+            page_info = orders_data.get("pageInfo", {})
+            if not page_info.get("hasNextPage"): break
+            
+            variables["cursor"] = page_info["endCursor"]
+            time.sleep(1)
+
+        return all_orders
+
+    def create_order(self, order_input):
+        """YENİ: Verilen bilgilerle yeni bir sipariş oluşturur - Doğru GraphQL type ve field'lar ile."""
+        # Shopify'ın güncel API'sine göre doğru type: OrderCreateOrderInput!
+        mutation = """
+        mutation orderCreate($order: OrderCreateOrderInput!) {
+          orderCreate(order: $order) {
+            order {
+              id
+              name
+              createdAt
+              totalPrice
+              email
+              customer {
+                id
+                email
+              }
+              shippingAddress {
+                firstName
+                lastName
+                address1
+                city
+                country
+              }
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+        """
+        # Doğru variable name ve type ile GraphQL çağrısı
+        result = self.execute_graphql(mutation, {"order": order_input})
+        
+        if errors := result.get('orderCreate', {}).get('userErrors', []):
+            error_messages = [f"{error.get('field', 'Genel')}: {error.get('message', 'Bilinmeyen hata')}" for error in errors]
+            raise Exception(f"Sipariş oluşturma hatası: {'; '.join(error_messages)}")
+            
+        order = result.get('orderCreate', {}).get('order', {})
+        if not order:
+            raise Exception("Sipariş oluşturuldu ancak sipariş bilgileri alınamadı")
+            
+        return order  
+
+    def get_locations(self):
+        query = """
+        query {
+          locations(first: 25, query:"status:active") {
+            edges {
+              node { id, name, address { city, country } }
+            }
+          }
+        }
+        """
+        try:
+            result = self.execute_graphql(query)
+            locations_edges = result.get("locations", {}).get("edges", [])
+            return [edge['node'] for edge in locations_edges]
+        except Exception as e:
+            logging.error(f"Shopify lokasyonları çekilirken hata: {e}")
+            return []
+
+    def get_all_collections(self, progress_callback=None):
+        all_collections = []
+        query = """
+        query getCollections($cursor: String) {
+          collections(first: 50, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
+            edges { node { id title } }
+          }
+        }
+        """
+        variables = {"cursor": None}
+        while True:
+            if progress_callback:
+                progress_callback(f"Shopify'dan koleksiyonlar çekiliyor... {len(all_collections)} koleksiyon bulundu.")
+            data = self.execute_graphql(query, variables)
+            collections_data = data.get("collections", {})
+            for edge in collections_data.get("edges", []):
+                all_collections.append(edge["node"])
+            if not collections_data.get("pageInfo", {}).get("hasNextPage"):
+                break
+            variables["cursor"] = collections_data["pageInfo"]["endCursor"]
+        logging.info(f"{len(all_collections)} adet koleksiyon bulundu.")
+        return all_collections
+
+    def get_all_products_for_export(self, progress_callback=None):
+        all_products = []
+        query = """
+        query getProductsForExport($cursor: String) {
+          products(first: 25, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
+            edges {
+              node {
+                title handle
+                collections(first: 20) { edges { node { id title } } }
+                featuredImage { url }
+                variants(first: 100) {
+                  edges {
+                    node {
+                      sku displayName inventoryQuantity
+                      selectedOptions { name value }
+                      inventoryItem { unitCost { amount } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        variables = {"cursor": None}
+        total_fetched = 0
+        while True:
+            if progress_callback:
+                progress_callback(f"Shopify'dan ürün verisi çekiliyor... {total_fetched} ürün alındı.")
+            data = self.execute_graphql(query, variables)
+            products_data = data.get("products", {})
+            for edge in products_data.get("edges", []):
+                all_products.append(edge["node"])
+            total_fetched = len(all_products)
+            if not products_data.get("pageInfo", {}).get("hasNextPage"):
+                break
+            variables["cursor"] = products_data["pageInfo"]["endCursor"]
+        logging.info(f"Export için toplam {len(all_products)} ürün çekildi.")
+        return all_products
+
+    def get_variant_ids_by_skus(self, skus: list, search_by_product_sku=False) -> dict:
+        """
+        RATE LIMIT KORUMASIZ GELIŞTIRILMIŞ VERSİYON
+        """
+        if not skus: return {}
+        sanitized_skus = [str(sku).strip() for sku in skus if sku]
+        if not sanitized_skus: return {}
+        
+        logging.info(f"{len(sanitized_skus)} adet SKU için varyant ID'leri aranıyor (Mod: {'Ürün Bazlı' if search_by_product_sku else 'Varyant Bazlı'})...")
+        sku_map = {}
+        
+        # KRITIK: Batch boyutunu 2'ye düşür
+        batch_size = 2
+        
+        for i in range(0, len(sanitized_skus), batch_size):
+            sku_chunk = sanitized_skus[i:i + batch_size]
+            query_filter = " OR ".join([f"sku:{json.dumps(sku)}" for sku in sku_chunk])
+            
+            query = """
+            query getProductsBySku($query: String!) {
+              products(first: 10, query: $query) {
+                edges {
+                  node {
+                    id
+                    variants(first: 50) {
+                      edges {
+                        node { 
+                          id
+                          sku 
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """
+
+            try:
+                logging.info(f"SKU batch {i//batch_size+1}/{len(range(0, len(sanitized_skus), batch_size))} işleniyor: {sku_chunk}")
+                result = self.execute_graphql(query, {"query": query_filter})
+                product_edges = result.get("products", {}).get("edges", [])
+                for p_edge in product_edges:
+                    product_node = p_edge.get("node", {})
+                    product_id = product_node.get("id")
+                    variant_edges = product_node.get("variants", {}).get("edges", [])
+                    for v_edge in variant_edges:
+                        node = v_edge.get("node", {})
+                        if node.get("sku") and node.get("id") and product_id:
+                            sku_map[node["sku"]] = {
+                                "variant_id": node["id"],
+                                "product_id": product_id
+                            }
+                
+                # KRITIK: Her batch sonrası uzun bekleme
+                if i + batch_size < len(sanitized_skus):
+                    logging.info(f"Batch {i//batch_size+1} tamamlandı, rate limit için 3 saniye bekleniyor...")
+                    time.sleep(3)
+            
+            except Exception as e:
+                logging.error(f"SKU grubu {i//batch_size+1} için varyant ID'leri alınırken hata: {e}")
+                # Hata durumunda da biraz bekle
+                time.sleep(5)
+                raise e
+
+        logging.info(f"Toplam {len(sku_map)} eşleşen varyant detayı bulundu.")
+        return sku_map
+
+    def get_product_media_details(self, product_gid):
+        try:
+            query = """
+            query getProductMedia($id: ID!) {
+                product(id: $id) {
+                    media(first: 250) {
+                        edges { node { id alt ... on MediaImage { image { originalSrc } } } }
+                    }
+                }
+            }
+            """
+            result = self.execute_graphql(query, {"id": product_gid})
+            media_edges = result.get("product", {}).get("media", {}).get("edges", [])
+            media_details = [{'id': n['id'], 'alt': n.get('alt'), 'originalSrc': n.get('image', {}).get('originalSrc')} for n in [e.get('node') for e in media_edges] if n]
+            logging.info(f"Ürün {product_gid} için {len(media_details)} mevcut medya bulundu.")
+            return media_details
+        except Exception as e:
+            logging.error(f"Mevcut medya detayları alınırken hata: {e}")
+            return []
+
+    def get_default_location_id(self):
+        if self.location_id: return self.location_id
+        query = "query { locations(first: 1, query: \"status:active\") { edges { node { id } } } }"
+        data = self.execute_graphql(query)
+        locations = data.get("locations", {}).get("edges", [])
+        if not locations: raise Exception("Shopify mağazasında aktif bir envanter lokasyonu bulunamadı.")
+        self.location_id = locations[0]['node']['id']
+        logging.info(f"Shopify Lokasyon ID'si bulundu: {self.location_id}")
+        return self.location_id
+
+    def load_all_products_for_cache(self, progress_callback=None):
+        """GraphQL ile tüm ürünleri önbelleğe al"""
+        total_loaded = 0
+        
+        query = """
+        query getProductsForCache($cursor: String) {
+          products(first: 50, after: $cursor) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+            edges {
+              node {
+                id
+                title
+                variants(first: 100) {
+                  edges {
+                    node {
+                      sku
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        
+        variables = {"cursor": None}
+        
+        while True:
+            if progress_callback: 
+                progress_callback({'message': f"Shopify ürünleri önbelleğe alınıyor... {total_loaded} ürün bulundu."})
+            
+            try:
+                data = self.execute_graphql(query, variables)
+                products_data = data.get("products", {})
+                
+                for edge in products_data.get("edges", []):
+                    product = edge["node"]
+                    # GID'den sadece ID'yi çıkar
+                    product_id = product["id"].split("/")[-1]
+                    product_data = {
+                        'id': int(product_id), 
+                        'gid': product["id"]
+                    }
+                    
+                    # Title ile önbelleğe al
+                    if title := product.get('title'): 
+                        self.product_cache[f"title:{title.strip()}"] = product_data
+                    
+                    # Variants ile önbelleğe al
+                    for variant_edge in product.get('variants', {}).get('edges', []):
+                        variant = variant_edge['node']
+                        if sku := variant.get('sku'): 
+                            self.product_cache[f"sku:{sku.strip()}"] = product_data
+                
+                total_loaded += len(products_data.get("edges", []))
+                
+                # Sayfalama kontrolü
+                page_info = products_data.get("pageInfo", {})
+                if not page_info.get("hasNextPage"):
+                    break
+                
+                variables["cursor"] = page_info["endCursor"]
+                time.sleep(0.5)  # Rate limit koruması
+                
+            except Exception as e:
+                logging.error(f"Ürünler önbelleğe alınırken hata: {e}")
+                break
+        
+        logging.info(f"Shopify'dan toplam {total_loaded} ürün önbelleğe alındı.")
+        return total_loaded
+    
+    def delete_product_media(self, product_id, media_ids):
+        """Ürün medyalarını siler"""
+        if not media_ids: 
+            return
+            
+        logging.info(f"Ürün GID: {product_id} için {len(media_ids)} medya siliniyor...")
+        
+        query = """
+        mutation productDeleteMedia($productId: ID!, $mediaIds: [ID!]!) {
+            productDeleteMedia(productId: $productId, mediaIds: $mediaIds) {
+                deletedMediaIds
+                userErrors { field message }
+            }
+        }
+        """
+        try:
+            result = self.execute_graphql(query, {'productId': product_id, 'mediaIds': media_ids})
+            deleted_ids = result.get('productDeleteMedia', {}).get('deletedMediaIds', [])
+            errors = result.get('productDeleteMedia', {}).get('userErrors', [])
+            
+            if errors: 
+                logging.warning(f"Medya silme hataları: {errors}")
+            
+            logging.info(f"{len(deleted_ids)} medya başarıyla silindi.")
+            
+        except Exception as e:
+            logging.error(f"Medya silinirken kritik hata oluştu: {e}")
+
+    def reorder_product_media(self, product_id, media_ids):
+        """Ürün medyalarını yeniden sıralar"""
+        if not media_ids or len(media_ids) < 2:
+            logging.info("Yeniden sıralama için yeterli medya bulunmuyor (1 veya daha az).")
+            return
+
+        moves = [{"id": media_id, "newPosition": str(i)} for i, media_id in enumerate(media_ids)]
+        
+        logging.info(f"Ürün {product_id} için {len(moves)} medya yeniden sıralama işlemi gönderiliyor...")
+        
+        query = """
+        mutation productReorderMedia($id: ID!, $moves: [MoveInput!]!) {
+          productReorderMedia(id: $id, moves: $moves) {
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+        """
+        try:
+            result = self.execute_graphql(query, {'id': product_id, 'moves': moves})
+            
+            errors = result.get('productReorderMedia', {}).get('userErrors', [])
+            if errors:
+                logging.warning(f"Medya yeniden sıralama hataları: {errors}")
+            else:
+                logging.info("✅ Medya yeniden sıralama işlemi başarıyla gönderildi.")
+                
+        except Exception as e:
+            logging.error(f"Medya yeniden sıralanırken kritik hata: {e}")
+
+    def test_connection(self):
+        """Shopify bağlantısını test eder"""
+        try:
+            query = """
+            query {
+                shop {
+                    name
+                    currencyCode
+                    plan {
+                        displayName
+                    }
+                }
+                products(first: 1) {
+                    edges {
+                        node {
+                            id
+                        }
+                    }
+                }
+            }
+            """
+            result = self.execute_graphql(query)
+            shop_data = result.get('shop', {})
+            products_data = result.get('products', {}).get('edges', [])
+            
+            return {
+                'success': True,
+                'name': shop_data.get('name'),
+                'currency': shop_data.get('currencyCode'),
+                'plan': shop_data.get('plan', {}).get('displayName'),
+                'products_count': len(products_data),
+                'message': 'GraphQL API OK'
+            }
+        except Exception as e:
+            return {'success': False, 'message': f'GraphQL API failed: {e}'}
+
+    def get_products_in_collection_with_inventory(self, collection_id):
+        """
+        Belirli bir koleksiyondaki tüm ürünleri, toplam stok bilgileriyle birlikte çeker.
+        Sayfalama yaparak tüm ürünlerin alınmasını sağlar.
+        """
+        all_products = []
+        query = """
+        query getCollectionProducts($id: ID!, $cursor: String) {
+          collection(id: $id) {
+            title
+            products(first: 50, after: $cursor) {
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+              edges {
+                node {
+                  id
+                  title
+                  handle
+                  totalInventory
+                  featuredImage {
+                    url(transform: {maxWidth: 100, maxHeight: 100})
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        variables = {"id": collection_id, "cursor": None}
+        
+        while True:
+            logging.info(f"Koleksiyon ürünleri çekiliyor... Cursor: {variables['cursor']}")
+            data = self.execute_graphql(query, variables)
+            
+            collection_data = data.get("collection")
+            if not collection_data:
+                logging.error(f"Koleksiyon {collection_id} bulunamadı veya veri alınamadı.")
+                break
+
+            products_data = collection_data.get("products", {})
+            for edge in products_data.get("edges", []):
+                all_products.append(edge["node"])
+            
+            page_info = products_data.get("pageInfo", {})
+            if not page_info.get("hasNextPage"):
+                break
+            
+            variables["cursor"] = page_info["endCursor"]
+            time.sleep(0.5) # Rate limit için küçük bir bekleme
+
+        logging.info(f"Koleksiyon için toplam {len(all_products)} ürün ve stok bilgisi çekildi.")
+        return all_products        
+        
+    def update_product_metafield(self, product_gid, namespace, key, value):
+        """
+        Bir ürünün belirli bir tamsayı (integer) metafield'ını günceller.
+        """
+        logging.info(f"Metafield güncelleniyor: Ürün GID: {product_gid}, {namespace}.{key} = {value}")
+        
+        # ✅ 2024-10 API FIX: productUpdate mutation ProductInput kullanıyor (ProductUpdateInput DEĞİL!)
+        mutation = """
+        mutation productUpdate($input: ProductInput!, $namespace: String!, $key: String!) {
+          productUpdate(input: $input) {
+            product {
+              id
+              metafield(namespace: $namespace, key: $key) {
+                value
+              }
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+        """
+        
+        variables = {
+          "input": {
+            "id": product_gid,
+            "metafields": [
+              {
+                "namespace": namespace,
+                "key": key,
+                "value": str(value),
+                "type": "number_integer"
+              }
+            ]
+          },
+          "namespace": namespace,
+          "key": key
+        }
+
+        try:
+            result = self.execute_graphql(mutation, variables)
+            if errors := result.get('productUpdate', {}).get('userErrors', []):
+                error_message = f"Metafield güncelleme hatası: {errors}"
+                logging.error(error_message)
+                return {'success': False, 'reason': error_message}
+            
+            updated_value = result.get('productUpdate', {}).get('product', {}).get('metafield', {}).get('value')
+            logging.info(f"✅ Metafield başarıyla güncellendi. Yeni değer: {updated_value}")
+            return {'success': True, 'new_value': updated_value}
+        
+        except Exception as e:
+            error_message = f"Metafield güncellenirken kritik hata: {e}"
+            logging.error(error_message)
+            return {'success': False, 'reason': str(e)}
+        
+    def create_product_sortable_metafield_definition(self, method='modern'):
+        """
+        Metafield tanımını, seçilen metoda (modern, legacy, hybrid) göre oluşturur.
+        """
+        logging.info(f"API üzerinden metafield tanımı oluşturuluyor (Metot: {method}, API Versiyon: {self.api_version})...")
+
+        mutation = """
+        mutation metafieldDefinitionCreate($definition: MetafieldDefinitionInput!) {
+          metafieldDefinitionCreate(definition: $definition) {
+            createdDefinition {
+              id
+              name
+            }
+            userErrors {
+              field
+              message
+              code
+            }
+          }
+        }
+        """
+
+        # Temel tanım
+        base_definition = {
+            "name": "Toplam Stok Siralamasi",
+            "namespace": "custom_sort",
+            "key": "total_stock",
+            "type": "number_integer",
+            "ownerType": "PRODUCT",
+        }
+
+        # Seçilen metoda göre tanımı dinamik olarak oluştur
+        if method == 'modern':
+            base_definition["capabilities"] = {"sortable": True}
+        elif method == 'legacy':
+            base_definition["sortable"] = True
+        elif method == 'hybrid':
+            base_definition["capabilities"] = {"sortable": True}
+            base_definition["sortable"] = True
+        
+        variables = {"definition": base_definition}
+
+        try:
+            result = self.execute_graphql(mutation, variables)
+            errors = result.get('metafieldDefinitionCreate', {}).get('userErrors', [])
+            if errors:
+                if any(error.get('code') == 'TAKEN' for error in errors):
+                    return {'success': True, 'message': 'Metafield tanımı zaten mevcut.'}
+                return {'success': False, 'message': f"Metafield tanımı hatası: {errors}"}
+
+            created_definition = result.get('metafieldDefinitionCreate', {}).get('createdDefinition')
+            if created_definition:
+                return {'success': True, 'message': f"✅ Tanım başarıyla oluşturuldu: {created_definition.get('name')}"}
+            return {'success': False, 'message': 'Tanım oluşturuldu ancak sonuç alınamadı.'}
+
+        except Exception as e:
+            return {'success': False, 'message': f"Kritik API hatası: {e}"}
+        
+    def get_collection_available_sort_keys(self, collection_gid):
+        """
+        Belirli bir koleksiyon için mevcut olan sıralama anahtarlarını
+        doğrudan API'den sorgular.
+        """
+        query = """
+        query collectionSortKeys($id: ID!) {
+          collection(id: $id) {
+            id
+            title
+            availableSortKeys {
+              key
+              title
+              urlParam
+            }
+          }
+        }
+        """
+        try:
+            result = self.execute_graphql(query, {"id": collection_gid})
+            collection_data = result.get('collection', {})
+            if not collection_data:
+                return {'success': False, 'message': 'Koleksiyon bulunamadı.'}
+            
+            sort_keys = collection_data.get('availableSortKeys', [])
+            return {'success': True, 'data': sort_keys}
+        except Exception as e:
+            return {'success': False, 'message': str(e)}
+
+    # ========== DASHBOARD İÇİN YENİ METODLAR ==========
+    
+    def get_dashboard_stats(self):
+        """Dashboard için detaylı istatistikleri getir"""
+        stats = {
+            'shop_info': {},
+            'orders_today': 0,
+            'orders_this_week': 0,
+            'orders_this_month': 0,
+            'revenue_today': 0,
+            'revenue_this_week': 0,
+            'revenue_this_month': 0,
+            'customers_count': 0,
+            'products_count': 0,
+            'recent_orders': [],
+            'top_products': [],
+            'low_stock_products': []
+        }
+        
+        try:
+            # Shop bilgileri
+            shop_query = """
+            query {
+              shop {
+                name
+                email
+                primaryDomain { host }
+                currencyCode
+                plan { displayName }
+                billingAddress { country }
+              }
+            }
+            """
+            shop_result = self.execute_graphql(shop_query)
+            if shop_result:
+                stats['shop_info'] = shop_result.get('shop', {})
+            
+            # Ürün sayısı - Shopify 2024-10 API uyumlu
+            products_query = """
+            query { 
+              products(first: 250) { 
+                pageInfo { 
+                  hasNextPage 
+                } 
+                edges { 
+                  node { id } 
+                } 
+              } 
+            }
+            """
+            products_result = self.execute_graphql(products_query)
+            if products_result:
+                # İlk 250 ürünü say - daha fazla ürün varsa pageInfo.hasNextPage true olur
+                products_edges = products_result.get('products', {}).get('edges', [])
+                stats['products_count'] = len(products_edges)
+                
+                # Toplam ürün sayısı 250'den fazlaysa uyarı ekle
+                has_more = products_result.get('products', {}).get('pageInfo', {}).get('hasNextPage', False)
+                if has_more:
+                    stats['products_count_note'] = f"{stats['products_count']}+ (daha fazla ürün var)"
+            
+            # Müşteri sayısı
+            customers_query = """
+            query {
+              customers(first: 1) {
+                pageInfo {
+                  hasNextPage
+                }
+                edges {
+                  node { id }
+                }
+              }
+            }
+            """
+            customers_result = self.execute_graphql(customers_query)
+            # Bu sadece tahmini bir sayım - gerçek sayı için analytics API gerekir
+            
+            # Bugünkü siparişler
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            today_iso = today.isoformat()
+            tomorrow_iso = (today + timedelta(days=1)).isoformat()
+            
+            orders_today_query = f"""
+            query {{
+              orders(first: 50, query: "created_at:>='{today_iso}' AND created_at:<'{tomorrow_iso}'") {{
+                edges {{
+                  node {{
+                    id
+                    name
+                    createdAt
+                    totalPriceSet {{ shopMoney {{ amount currencyCode }} }}
+                    customer {{ firstName lastName }}
+                  }}
+                }}
+              }}
+            }}
+            """
+            orders_today_result = self.execute_graphql(orders_today_query)
+            if orders_today_result:
+                today_orders = orders_today_result.get('orders', {}).get('edges', [])
+                stats['orders_today'] = len(today_orders)
+                stats['revenue_today'] = sum(
+                    float(order['node'].get('totalPriceSet', {}).get('shopMoney', {}).get('amount', 0))
+                    for order in today_orders
+                )
+                stats['recent_orders'] = [order['node'] for order in today_orders[:5]]
+            
+            # Bu haftaki siparişler
+            week_start = today - timedelta(days=today.weekday())
+            week_iso = week_start.isoformat()
+            
+            orders_week_query = f"""
+            query {{
+              orders(first: 250, query: "created_at:>='{week_iso}'") {{
+                edges {{
+                  node {{
+                    id
+                    totalPriceSet {{ shopMoney {{ amount }} }}
+                  }}
+                }}
+              }}
+            }}
+            """
+            orders_week_result = self.execute_graphql(orders_week_query)
+            if orders_week_result:
+                week_orders = orders_week_result.get('orders', {}).get('edges', [])
+                stats['orders_this_week'] = len(week_orders)
+                stats['revenue_this_week'] = sum(
+                    float(order['node'].get('totalPriceSet', {}).get('shopMoney', {}).get('amount', 0))
+                    for order in week_orders
+                )
+            
+            # Bu ayki siparişler
+            month_start = today.replace(day=1)
+            month_iso = month_start.isoformat()
+            
+            orders_month_query = f"""
+            query {{
+              orders(first: 250, query: "created_at:>='{month_iso}'") {{
+                edges {{
+                  node {{
+                    id
+                    totalPriceSet {{ shopMoney {{ amount }} }}
+                  }}
+                }}
+              }}
+            }}
+            """
+            orders_month_result = self.execute_graphql(orders_month_query)
+            if orders_month_result:
+                month_orders = orders_month_result.get('orders', {}).get('edges', [])
+                stats['orders_this_month'] = len(month_orders)
+                stats['revenue_this_month'] = sum(
+                    float(order['node'].get('totalPriceSet', {}).get('shopMoney', {}).get('amount', 0))
+                    for order in month_orders
+                )
+            
+            return stats
+            
+        except Exception as e:
+            logging.error(f"Dashboard istatistikleri alınırken hata: {e}")
+            return stats
