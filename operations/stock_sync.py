@@ -2,6 +2,10 @@
 
 import logging
 import time
+from connectors.shopify_api import ShopifyAPI
+from gsheets_manager import GoogleSheetsManager
+from log_manager import LogManager
+import config_manager
 from utils import get_variant_color, get_variant_size, get_apparel_sort_key
 import json 
 

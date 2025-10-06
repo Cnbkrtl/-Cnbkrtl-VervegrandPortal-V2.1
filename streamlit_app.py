@@ -77,7 +77,7 @@ def load_and_verify_user_data(username):
 # --- Ana Uygulama Mantığı ---
 initialize_session_state_defaults() # Sayfa yüklenirken varsayılan değerleri ayarla
 
-with open('config.yaml') as file:
+with open('config.yaml', encoding='utf-8') as file:
     config = yaml.load(file, Loader=SafeLoader)
 
 authenticator = stauth.Authenticate(
