@@ -76,8 +76,19 @@ def transfer_order(source_api, destination_api, order_data):
     
     try:
         # 1. Müşteriyi Hedef Mağazada Bul veya Oluştur
-        customer_id = find_or_create_customer(destination_api, order_data.get('customer'))
-        log_messages.append(f"Müşteri ID'si '{customer_id}' olarak belirlendi.")
+        source_customer = order_data.get('customer')
+        customer_id = find_or_create_customer(destination_api, source_customer)
+        
+        # Müşteri bilgilerini logla
+        customer_name = f"{source_customer.get('firstName', '')} {source_customer.get('lastName', '')}".strip()
+        customer_email = source_customer.get('email', 'Bilinmiyor')
+        default_address = source_customer.get('defaultAddress', {})
+        company_name = default_address.get('company', '')
+        
+        log_messages.append(f"👤 Müşteri: {customer_name} ({customer_email})")
+        if company_name:
+            log_messages.append(f"🏢 Şirket: {company_name}")
+        log_messages.append(f"🆔 Müşteri ID'si: {customer_id}")
         
         # 2. Ürün Satırlarını Eşleştir
         line_items, mapping_logs = map_line_items(destination_api, order_data.get('lineItems', {}).get('nodes', []))
@@ -236,10 +247,20 @@ def transfer_order(source_api, destination_api, order_data):
         customer = order_data.get('customer') or {}
         customer_email = customer.get('email') or None
         
+        # Adres bilgilerini logla
+        shipping_addr = order_data.get('shippingAddress') or {}
+        billing_addr = order_data.get('billingAddress') or shipping_addr
+        
+        if shipping_addr.get('company'):
+            log_messages.append(f"📦 Kargo Adresi - Şirket: {shipping_addr.get('company')}")
+        if billing_addr.get('company') and billing_addr.get('company') != shipping_addr.get('company'):
+            log_messages.append(f"🧾 Fatura Adresi - Şirket: {billing_addr.get('company')}")
+        
         order_data_for_creation = {
             "customerId": customer_id,
             "lineItems": line_items,
-            "shippingAddress": order_data.get('shippingAddress') or {},
+            "shippingAddress": shipping_addr,
+            "billingAddress": billing_addr,  # ✅ FATURA ADRESİ
             "note": order_note,
             "email": customer_email,
             "taxesIncluded": True  # ÖNEMLİ: Fiyatlar vergi dahil

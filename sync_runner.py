@@ -32,13 +32,26 @@ def _update_product(shopify_api, sentos_api, sentos_product, existing_product, s
     logging.info(f"Mevcut ürün güncelleniyor: '{product_name}' (GID: {shopify_gid}) | Mod: {sync_mode}")
     all_changes = []
     
+    # ✅ ÖZEL: SEO Alt Metinli Resimler modu - SADECE ALT TEXT GÜNCELLER
+    if sync_mode == "SEO Alt Metinli Resimler":
+        logging.info(f"🎯 SEO Modu: Sadece resim ALT text'leri güncelleniyor...")
+        result = shopify_api.update_product_media_seo(shopify_gid, product_name)
+        if result['success']:
+            all_changes.append(f"✅ {result['message']}")
+            logging.info(f"✅ SEO Güncelleme: {result['message']}")
+        else:
+            all_changes.append(f"❌ SEO Hatası: {result['message']}")
+            logging.error(f"❌ SEO Hatası: {result['message']}")
+        return all_changes
+    
+    # Normal sync modları
     if sync_mode in ["Tam Senkronizasyon (Tümünü Oluştur ve Güncelle)", "Sadece Açıklamalar"]:
          all_changes.extend(core_sync.sync_details(shopify_api, shopify_gid, sentos_product))
          all_changes.extend(core_sync.sync_product_type(shopify_api, shopify_gid, sentos_product))
     if sync_mode in ["Tam Senkronizasyon (Tümünü Oluştur ve Güncelle)", "Sadece Stok ve Varyantlar"]:
         all_changes.extend(stock_sync.sync_stock_and_variants(shopify_api, shopify_gid, sentos_product))
-    if sync_mode in ["Tam Senkronizasyon (Tümünü Oluştur ve Güncelle)", "Sadece Resimler", "SEO Alt Metinli Resimler"]:
-        set_alt = sync_mode in ["Tam Senkronizasyon (Tümünü Oluştur ve Güncelle)", "SEO Alt Metinli Resimler"]
+    if sync_mode in ["Tam Senkronizasyon (Tümünü Oluştur ve Güncelle)", "Sadece Resimler"]:
+        set_alt = sync_mode == "Tam Senkronizasyon (Tümünü Oluştur ve Güncelle)"
         all_changes.extend(media_sync.sync_media(shopify_api, sentos_api, shopify_gid, sentos_product, set_alt_text=set_alt))
         
     logging.info(f"✅ Ürün '{product_name}' başarıyla güncellendi.")
@@ -225,6 +238,61 @@ def _create_product(shopify_api, sentos_api, sentos_product):
         logging.error(f"Ürün oluşturma hatası: {e}\n{traceback.format_exc()}")
         raise
 
+def _process_seo_only(shopify_api, shopify_product, progress_callback, stats, details, lock):
+    """
+    SEO Alt Metinli Resimler modu için optimize edilmiş işleyici.
+    Sadece mevcut Shopify ürününün resim ALT metinlerini günceller.
+    Sentos API'ye ihtiyaç duzmaz.
+    """
+    # GID formatını kullan (GraphQL için gerekli)
+    product_gid = shopify_product.get('gid', 'N/A')
+    product_id = shopify_product.get('id', 'N/A')  # Sayısal ID (loglama için)
+    title = shopify_product.get('title', 'Bilinmeyen Ürün')
+    
+    log_entry = {
+        'product_id': product_id,
+        'title': title,
+        'status': 'updated',
+        'reason': 'SEO güncelleme tamamlandı'
+    }
+    
+    try:
+        # Sadece SEO güncelleme yap - GID ve title parametrelerini gönder
+        result = shopify_api.update_product_media_seo(product_gid, title)
+        
+        if result.get('success'):
+            status = 'updated'
+            status_icon = "🔄"
+            with lock: stats['updated'] += 1
+            changes_made = [result.get('message', 'SEO güncellendi')]
+        else:
+            status = 'skipped'
+            status_icon = "⏭️"
+            with lock: stats['skipped'] += 1
+            changes_made = [result.get('message', 'Değişiklik yok')]
+        
+        changes_html = "".join([f'<li><small>{change}</small></li>' for change in changes_made])
+        log_html = f"""
+        <div style='border-bottom: 1px solid #444; padding-bottom: 8px; margin-bottom: 8px;'>
+            <strong>{status_icon} SEO {status.capitalize()}:</strong> {title}
+            <ul style='margin-top: 5px; margin-bottom: 0; padding-left: 20px;'>
+                {changes_html if changes_made else "<li><small>Değişiklik bulunamadı veya resim yok.</small></li>"}
+            </ul>
+        </div>
+        """
+        progress_callback({'log_detail': log_html})
+        with lock: details.append(log_entry)
+
+    except Exception as e:
+        error_message = f"❌ SEO Hatası: {title} - {e}"
+        progress_callback({'log_detail': f"<div style='color: #f48a94;'>{error_message}</div>"})
+        with lock: 
+            stats['failed'] += 1
+            log_entry.update({'status': 'failed', 'reason': str(e)})
+            details.append(log_entry)
+    finally:
+        with lock: stats['processed'] += 1
+
 def _process_single_product(shopify_api, sentos_api, sentos_product, sync_mode, progress_callback, stats, details, lock):
     name = sentos_product.get('name', 'Bilinmeyen Ürün')
     sku = sentos_product.get('sku', 'SKU Yok')
@@ -284,29 +352,67 @@ def _run_core_sync_logic(shopify_config, sentos_config, sync_mode, max_workers, 
 
     try:
         shopify_api = ShopifyAPI(shopify_config['store_url'], shopify_config['access_token'])
-        sentos_api = SentosAPI(sentos_config['api_url'], sentos_config['api_key'], sentos_config['api_secret'], sentos_config.get('cookie'))
         
-        shopify_api.load_all_products_for_cache(progress_callback)
-        sentos_products = sentos_api.get_all_products(progress_callback)
+        # SEO MODU OPTIMIZASYONU: SEO Alt Metinli Resimler modu için Sentos API'yi kullanmayalım
+        if sync_mode == "SEO Alt Metinli Resimler":
+            logging.info("SEO Alt Metinli Resimler modu aktif - Sentos API atlanıyor, sadece Shopify ürünleri işleniyor")
+            
+            # Shopify ürünlerini cache'e yükle
+            shopify_api.load_all_products_for_cache(progress_callback)
+            
+            # ✅ ÖNEMLİ: Cache'de aynı ürün birden fazla kez var (title + her variant için SKU)
+            # Duplicate'leri önlemek için GID'ye göre unique ürünleri alalım
+            unique_products = {}
+            for product_data in shopify_api.product_cache.values():
+                gid = product_data.get('gid')
+                if gid and gid not in unique_products:
+                    unique_products[gid] = product_data
+            
+            shopify_products = list(unique_products.values())
+            
+            if test_mode: 
+                shopify_products = shopify_products[:20]
+                logging.info(f"Test modu aktif: İlk 20 ürün işlenecek")
+            
+            stats['total'] = len(shopify_products)
+            logging.info(f"Toplam {stats['total']} benzersiz Shopify ürünü için SEO güncellemesi başlatılıyor")
+            
+            # Her Shopify ürünü için sadece SEO güncelleme yap
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="SEOWorker") as executor:
+                futures = [executor.submit(_process_seo_only, shopify_api, p, progress_callback, stats, details, lock) for p in shopify_products]
+                for future in as_completed(futures):
+                    if stop_event.is_set(): 
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+                    processed, total = stats['processed'], stats['total']
+                    progress = 55 + int((processed / total) * 45) if total > 0 else 100
+                    progress_callback({'progress': progress, 'message': f"SEO İşlenen: {processed}/{total}", 'stats': stats.copy()})
         
-        if test_mode: sentos_products = sentos_products[:20]
+        else:
+            # NORMAL MOD: Sentos API ile çalış
+            sentos_api = SentosAPI(sentos_config['api_url'], sentos_config['api_key'], sentos_config['api_secret'], sentos_config.get('cookie'))
+            
+            shopify_api.load_all_products_for_cache(progress_callback)
+            sentos_products = sentos_api.get_all_products(progress_callback)
+            
+            if test_mode: sentos_products = sentos_products[:20]
 
-        products_to_process = sentos_products
-        if find_missing_only:
-            products_to_process = [p for p in sentos_products if not _find_shopify_product(shopify_api, p)]
-            logging.info(f"{len(products_to_process)} adet eksik ürün bulundu.")
-        
-        stats['total'] = len(products_to_process)
+            products_to_process = sentos_products
+            if find_missing_only:
+                products_to_process = [p for p in sentos_products if not _find_shopify_product(shopify_api, p)]
+                logging.info(f"{len(products_to_process)} adet eksik ürün bulundu.")
+            
+            stats['total'] = len(products_to_process)
 
-        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="SyncWorker") as executor:
-            futures = [executor.submit(_process_single_product, shopify_api, sentos_api, p, sync_mode, progress_callback, stats, details, lock) for p in products_to_process]
-            for future in as_completed(futures):
-                if stop_event.is_set(): 
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    break
-                processed, total = stats['processed'], stats['total']
-                progress = 55 + int((processed / total) * 45) if total > 0 else 100
-                progress_callback({'progress': progress, 'message': f"İşlenen: {processed}/{total}", 'stats': stats.copy()})
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="SyncWorker") as executor:
+                futures = [executor.submit(_process_single_product, shopify_api, sentos_api, p, sync_mode, progress_callback, stats, details, lock) for p in products_to_process]
+                for future in as_completed(futures):
+                    if stop_event.is_set(): 
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+                    processed, total = stats['processed'], stats['total']
+                    progress = 55 + int((processed / total) * 45) if total > 0 else 100
+                    progress_callback({'progress': progress, 'message': f"İşlenen: {processed}/{total}", 'stats': stats.copy()})
 
         duration = time.monotonic() - start_time
         results = {'stats': stats, 'details': details, 'duration': str(timedelta(seconds=duration))}

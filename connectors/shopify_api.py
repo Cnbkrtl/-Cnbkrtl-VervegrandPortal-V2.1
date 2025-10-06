@@ -181,12 +181,15 @@ class ShopifyAPI:
         return edges[0]['node']['id'] if edges else None
 
     def create_customer(self, customer_data):
-        """YENİ: Yeni bir müşteri oluşturur."""
+        """YENİ: Yeni bir müşteri oluşturur - Şirket ve adres bilgileri ile."""
         mutation = """
         mutation customerCreate($input: CustomerInput!) {
           customerCreate(input: $input) {
             customer {
               id
+              email
+              firstName
+              lastName
             }
             userErrors {
               field
@@ -201,6 +204,28 @@ class ShopifyAPI:
             "email": customer_data.get('email'),
             "phone": customer_data.get('phone')
         }
+        
+        # Adres bilgilerini ekle (defaultAddress veya addresses)
+        default_address = customer_data.get('defaultAddress')
+        if default_address:
+            # Müşteriye adres ekle
+            address_input = {
+                "address1": default_address.get('address1'),
+                "address2": default_address.get('address2'),
+                "city": default_address.get('city'),
+                "company": default_address.get('company'),  # ŞİRKET BİLGİSİ
+                "firstName": default_address.get('firstName') or customer_data.get('firstName'),
+                "lastName": default_address.get('lastName') or customer_data.get('lastName'),
+                "phone": default_address.get('phone') or customer_data.get('phone'),
+                "province": default_address.get('province'),
+                "country": default_address.get('country'),
+                "zip": default_address.get('zip')
+            }
+            # Boş değerleri temizle
+            address_input = {k: v for k, v in address_input.items() if v}
+            if address_input:
+                input_data["addresses"] = [address_input]
+        
         result = self.execute_graphql(mutation, {"input": input_data})
         if errors := result.get('customerCreate', {}).get('userErrors', []):
             raise Exception(f"Müşteri oluşturma hatası: {errors}")
@@ -245,7 +270,23 @@ class ShopifyAPI:
                   lastName
                   email
                   phone
-                  numberOfOrders 
+                  numberOfOrders
+                  # Şirket ve adres bilgileri
+                  defaultAddress {
+                    id
+                    firstName
+                    lastName
+                    company
+                    address1
+                    address2
+                    city
+                    province
+                    provinceCode
+                    zip
+                    country
+                    countryCodeV2
+                    phone
+                  }
                 }
                 
                 # Ödeme yöntemi (gateway names)
@@ -350,6 +391,23 @@ class ShopifyAPI:
                   country
                   countryCodeV2
                   phone
+                  company
+                }
+                
+                billingAddress {
+                  name
+                  firstName
+                  lastName
+                  address1
+                  address2
+                  city
+                  province
+                  provinceCode
+                  zip
+                  country
+                  countryCodeV2
+                  phone
+                  company
                 }
               }
             }
@@ -640,9 +698,11 @@ class ShopifyAPI:
                     product = edge["node"]
                     # GID'den sadece ID'yi çıkar
                     product_id = product["id"].split("/")[-1]
+                    product_title = product.get('title', '')
                     product_data = {
                         'id': int(product_id), 
-                        'gid': product["id"]
+                        'gid': product["id"],
+                        'title': product_title  # SEO modu için title eklendi
                     }
                     
                     # Title ile önbelleğe al
@@ -1128,3 +1188,362 @@ class ShopifyAPI:
         except Exception as e:
             logging.error(f"Dashboard istatistikleri alınırken hata: {e}")
             return stats
+
+    def update_product_media_seo(self, product_gid, product_title):
+        """
+        🎯 SADECE SEO için ürün resimlerinin ALT text'ini SEO dostu formatta günceller.
+        HİÇBİR RESİM EKLEME/SİLME/YENİDEN SIRALAMA YAPMAZ.
+        
+        ALT Text Formatı (Shopify Admin'de "Ad" olarak görünür):
+        - 1. resim: Buyuk-Beden-Uzun-Kollu-Leopar-Desenli-Diz-Ustu-Elbise-285058-a
+        - 2. resim: Buyuk-Beden-Uzun-Kollu-Leopar-Desenli-Diz-Ustu-Elbise-285058-b
+        - 3. resim: Buyuk-Beden-Uzun-Kollu-Leopar-Desenli-Diz-Ustu-Elbise-285058-c
+        - vb...
+        
+        Özellikler:
+        - Türkçe karakterler İngilizce'ye çevrilir (ı→i, ğ→g, ü→u, ş→s, ö→o, ç→c)
+        - Boşluklar tire (-) ile değiştirilir
+        - Her resim sıralı harf eki alır (a, b, c, d, e...)
+        - İlk harfler büyük kalır (SEO için)
+        
+        Args:
+            product_gid: Ürünün Shopify Global ID'si (gid://shopify/Product/123)
+            product_title: Ürün başlığı
+            
+        Returns:
+            dict: {'success': bool, 'updated_count': int, 'message': str}
+        """
+        try:
+            # 1. Mevcut medyaları al
+            query = """
+            query getProductMedia($id: ID!) {
+                product(id: $id) {
+                    media(first: 250) {
+                        edges {
+                            node {
+                                id
+                                alt
+                                mediaContentType
+                                ... on MediaImage {
+                                    image {
+                                        originalSrc
+                                        url
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            """
+            result = self.execute_graphql(query, {"id": product_gid})
+            media_edges = result.get("product", {}).get("media", {}).get("edges", [])
+            
+            if not media_edges:
+                return {
+                    'success': True,
+                    'updated_count': 0,
+                    'message': 'Güncellenecek resim bulunamadı'
+                }
+            
+            # 2. SEO dostu base filename oluştur (Türkçe karakterler temizlenir, boşluklar tire)
+            # Örnek: "Büyük Beden Kısa Kollu Bisiklet Yaka Baskılı T-shirt 303734"
+            # Sonuç: "Buyuk-Beden-Kisa-Kollu-Bisiklet-Yaka-Baskili-T-shirt-303734"
+            base_filename = self._create_seo_filename_with_dashes(product_title)
+            
+            # 3. Her resim için ALT text ve filename güncelle
+            updated_count = 0
+            alphabet = 'abcdefghijklmnopqrstuvwxyz'  # Sıralı harf ekleri için
+            
+            for idx, edge in enumerate(media_edges):
+                node = edge.get('node', {})
+                media_id = node.get('id')
+                media_type = node.get('mediaContentType')
+                
+                if media_type != 'IMAGE':
+                    continue
+                
+                # Harf eki (a, b, c, d, e...)
+                letter_suffix = alphabet[idx] if idx < len(alphabet) else f"z{idx - 25}"
+                
+                # ✅ ÇÖZÜM: Shopify Admin'deki "Ad" kısmı = ALT field
+                # ALT text'i filename formatında yapıyoruz
+                # Örnek: Buyuk-Beden-Uzun-Kollu-Leopar-Desenli-Diz-Ustu-Elbise-285058-a
+                new_alt_with_filename = f"{base_filename}-{letter_suffix}"
+                
+                # 4. Medya güncelle
+                mutation = """
+                mutation updateMedia($media: [UpdateMediaInput!]!, $productId: ID!) {
+                    productUpdateMedia(media: $media, productId: $productId) {
+                        media {
+                            id
+                            alt
+                        }
+                        mediaUserErrors {
+                            field
+                            message
+                        }
+                    }
+                }
+                """
+                
+                media_input = [{
+                    "id": media_id,
+                    "alt": new_alt_with_filename  # ✅ ALT = FILENAME FORMATI (Buyuk-Beden-Elbise-285058-a)
+                }]
+                
+                update_result = self.execute_graphql(
+                    mutation,
+                    {
+                        "media": media_input,
+                        "productId": product_gid
+                    }
+                )
+                
+                errors = update_result.get('productUpdateMedia', {}).get('mediaUserErrors', [])
+                if errors:
+                    logging.error(f"  ❌ Resim {idx + 1} güncelleme hatası: {errors}")
+                else:
+                    updated_count += 1
+                    logging.info(f"  ✅ Resim {idx + 1}/{len(media_edges)}: ALT='{new_alt_with_filename}'")
+
+                
+                # Rate limit koruması
+                time.sleep(0.3)
+            
+            return {
+                'success': True,
+                'updated_count': updated_count,
+                'message': f'{updated_count}/{len(media_edges)} resim SEO formatında güncellendi (tire ile)'
+            }
+            
+        except Exception as e:
+            logging.error(f"SEO media güncelleme hatası: {e}")
+            return {
+                'success': False,
+                'updated_count': 0,
+                'message': f'Hata: {str(e)}'
+            }
+    
+    def _create_seo_filename_with_dashes(self, title):
+        """
+        Ürün başlığından SEO dostu dosya adı oluşturur - TIRE İLE.
+        Boşluklar tire (-) ile değiştirilir, ilk harfler büyük kalır.
+        Örnek: "Büyük Beden T-shirt 303734" -> "Buyuk-Beden-T-shirt-303734"
+        """
+        import re
+        
+        # Türkçe karakterleri İngilizce karşılıklarına çevir (BÜYÜK/küçük harf korunur)
+        tr_map = str.maketrans({
+            'ı': 'i', 'ğ': 'g', 'ü': 'u', 'ş': 's', 'ö': 'o', 'ç': 'c',
+            'İ': 'I', 'Ğ': 'G', 'Ü': 'U', 'Ş': 'S', 'Ö': 'O', 'Ç': 'C'
+        })
+        
+        filename = title.translate(tr_map)
+        
+        # Özel karakterleri kaldır, sadece harf, rakam, boşluk ve tire bırak
+        filename = re.sub(r'[^a-zA-Z0-9\s-]', '', filename)
+        
+        # Birden fazla boşluğu tek boşluğa çevir
+        filename = re.sub(r'\s+', ' ', filename.strip())
+        
+        # Boşlukları tire ile değiştir
+        filename = filename.replace(' ', '-')
+        
+        # Birden fazla tireyi tek tire yap
+        filename = re.sub(r'-+', '-', filename)
+        
+        return filename.strip('-')
+
+    def update_product_category_and_metafields(self, product_gid: str, category: str, metafields: list) -> dict:
+        """
+        Ürünün kategorisini (product type) ve meta alanlarını günceller.
+        
+        Args:
+            product_gid: Ürün GID (gid://shopify/Product/123456)
+            category: Kategori adı (T-shirt, Elbise vb.)
+            metafields: Meta alan listesi [{'namespace': 'custom', 'key': 'yaka_tipi', 'value': 'V Yaka', 'type': 'single_line_text_field'}]
+            
+        Returns:
+            dict: {'success': bool, 'message': str, 'updated_category': str, 'updated_metafields': int}
+        """
+        try:
+            updated_count = 0
+            
+            # 1. Product Type (Kategori) güncelle
+            if category:
+                update_mutation = """
+                mutation updateProductType($input: ProductInput!) {
+                    productUpdate(input: $input) {
+                        product {
+                            id
+                            productType
+                        }
+                        userErrors {
+                            field
+                            message
+                        }
+                    }
+                }
+                """
+                
+                result = self.execute_graphql(
+                    update_mutation,
+                    {
+                        "input": {
+                            "id": product_gid,
+                            "productType": category
+                        }
+                    }
+                )
+                
+                errors = result.get('productUpdate', {}).get('userErrors', [])
+                if errors:
+                    logging.error(f"Kategori güncelleme hatası: {errors}")
+                else:
+                    logging.info(f"✅ Kategori güncellendi: {category}")
+                    updated_count += 1
+            
+            # 2. Metafields güncelle
+            if metafields:
+                for metafield in metafields:
+                    metafield_mutation = """
+                    mutation updateProductMetafield($input: ProductInput!) {
+                        productUpdate(input: $input) {
+                            product {
+                                id
+                                metafields(first: 50) {
+                                    edges {
+                                        node {
+                                            namespace
+                                            key
+                                            value
+                                        }
+                                    }
+                                }
+                            }
+                            userErrors {
+                                field
+                                message
+                            }
+                        }
+                    }
+                    """
+                    
+                    metafield_input = {
+                        "id": product_gid,
+                        "metafields": [{
+                            "namespace": metafield['namespace'],
+                            "key": metafield['key'],
+                            "value": metafield['value'],
+                            "type": metafield['type']
+                        }]
+                    }
+                    
+                    result = self.execute_graphql(metafield_mutation, {"input": metafield_input})
+                    
+                    errors = result.get('productUpdate', {}).get('userErrors', [])
+                    if errors:
+                        logging.error(f"Metafield güncelleme hatası ({metafield['key']}): {errors}")
+                    else:
+                        logging.info(f"✅ Metafield güncellendi: {metafield['namespace']}.{metafield['key']} = '{metafield['value']}'")
+                        updated_count += 1
+                    
+                    time.sleep(0.3)  # Rate limit
+            
+            return {
+                'success': True,
+                'message': f"Kategori ve {len(metafields)} meta alan güncellendi",
+                'updated_category': category,
+                'updated_metafields': len(metafields)
+            }
+            
+        except Exception as e:
+            logging.error(f"Kategori/metafield güncelleme hatası: {e}")
+            return {
+                'success': False,
+                'message': f'Hata: {str(e)}',
+                'updated_category': None,
+                'updated_metafields': 0
+            }
+    
+    def get_product_metafields(self, product_gid: str) -> dict:
+        """
+        Ürünün mevcut meta alanlarını getirir.
+        
+        Args:
+            product_gid: Ürün GID
+            
+        Returns:
+            dict: Meta alanlar dictionary {namespace.key: value}
+        """
+        try:
+            query = """
+            query getProductMetafields($id: ID!) {
+                product(id: $id) {
+                    id
+                    title
+                    productType
+                    metafields(first: 100) {
+                        edges {
+                            node {
+                                namespace
+                                key
+                                value
+                                type
+                            }
+                        }
+                    }
+                }
+            }
+            """
+            
+            result = self.execute_graphql(query, {"id": product_gid})
+            product = result.get('product', {})
+            
+            metafields = {}
+            for edge in product.get('metafields', {}).get('edges', []):
+                node = edge['node']
+                key = f"{node['namespace']}.{node['key']}"
+                metafields[key] = {
+                    'value': node['value'],
+                    'type': node['type']
+                }
+            
+            return {
+                'product_type': product.get('productType', ''),
+                'metafields': metafields
+            }
+            
+        except Exception as e:
+            logging.error(f"Metafield getirme hatası: {e}")
+            return {'product_type': '', 'metafields': {}}
+    
+    def _create_seo_filename(self, title):
+        """
+        Ürün başlığından SEO dostu dosya adı oluşturur.
+        Örnek: "Büyük Beden T-shirt 303734" -> "buyuk-beden-t-shirt-303734"
+        """
+        import unicodedata
+        import re
+        
+        # Türkçe karakterleri İngilizce karşılıklarına çevir
+        tr_chars = {
+            'ı': 'i', 'ğ': 'g', 'ü': 'u', 'ş': 's', 'ö': 'o', 'ç': 'c',
+            'İ': 'i', 'Ğ': 'g', 'Ü': 'u', 'Ş': 's', 'Ö': 'o', 'Ç': 'c'
+        }
+        
+        filename = title.lower()
+        for tr_char, en_char in tr_chars.items():
+            filename = filename.replace(tr_char, en_char)
+        
+        # Özel karakterleri kaldır, sadece harf, rakam ve boşluk bırak
+        filename = re.sub(r'[^a-z0-9\s-]', '', filename)
+        
+        # Birden fazla boşluğu tek tire ile değiştir
+        filename = re.sub(r'\s+', '-', filename.strip())
+        
+        # Birden fazla tireyi tek tire yap
+        filename = re.sub(r'-+', '-', filename)
+        
+        return filename.strip('-')

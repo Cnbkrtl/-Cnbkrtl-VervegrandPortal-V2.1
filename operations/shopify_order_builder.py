@@ -31,6 +31,8 @@ def create_order_input_builder():
             address["firstName"] = first_name
         if last_name:
             address["lastName"] = last_name
+        if address_data.get('company'):  # ✅ ŞİRKET BİLGİSİ
+            address["company"] = address_data.get('company')
         if address_data.get('address1'):
             address["address1"] = address_data.get('address1')
         if address_data.get('address2'):
