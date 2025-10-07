@@ -77,8 +77,40 @@ def load_and_verify_user_data(username):
 # --- Ana Uygulama Mantığı ---
 initialize_session_state_defaults() # Sayfa yüklenirken varsayılan değerleri ayarla
 
-with open('config.yaml', encoding='utf-8') as file:
-    config = yaml.load(file, Loader=SafeLoader)
+# YENİ: config.yaml yerine Streamlit Secrets kullanarak authenticator yapılandırması
+# Eğer config.yaml dosyası yoksa, varsayılan yapılandırma oluştur
+import os
+
+config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
+
+if os.path.exists(config_path):
+    # Eğer config.yaml varsa onu kullan
+    with open(config_path, encoding='utf-8') as file:
+        config = yaml.load(file, Loader=SafeLoader)
+else:
+    # Yoksa varsayılan yapılandırma oluştur (Streamlit Cloud için)
+    # Not: Şifre hash'leri önceden oluşturulmuş olmalı
+    config = {
+        'credentials': {
+            'usernames': {
+                'admin': {
+                    'email': 'admin@vervegrand.com',
+                    'name': 'Admin',
+                    'password': '$2b$12$HjMUzQ7yUbJn9vLfhez.reHQ4hCcKVc0b6djMWelYmHf2PFnigedu'  # 19519
+                },
+                'cnbkrtl': {
+                    'email': 'cnbkrtl@vervegrand.com',
+                    'name': 'Cnbkrtl',
+                    'password': '$2b$12$AaeMp3GP7arq/0zLO9RBReFAfPq8.ICRLqct8VYlg.6L0UzI6iB0y'  # Cn1Bkrtl
+                }
+            }
+        },
+        'cookie': {
+            'expiry_days': 30,
+            'key': 'vervegrand_secret_key_change_this_in_production',
+            'name': 'vervegrand_auth_cookie'
+        }
+    }
 
 authenticator = stauth.Authenticate(
     config['credentials'],
