@@ -8,6 +8,7 @@ import pandas as pd
 from io import StringIO
 import threading
 import queue
+import os
 
 # Gerekli modülleri import ediyoruz
 from config_manager import load_all_user_keys
@@ -17,6 +18,28 @@ from connectors.shopify_api import ShopifyAPI
 from connectors.sentos_api import SentosAPI
 
 st.set_page_config(page_title="Vervegrand Sync", page_icon="🔄", layout="wide", initial_sidebar_state="expanded")
+
+# 🎨 GLOBAL CSS YÜKLEME - Tüm sayfalarda geçerli
+def load_css():
+    """Global CSS dosyasını yükler - Tüm uygulamada geçerli olur"""
+    css_file_path = os.path.join(os.path.dirname(__file__), 'style.css')
+    
+    if os.path.exists(css_file_path):
+        with open(css_file_path, encoding='utf-8') as f:
+            st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
+    else:
+        # CSS dosyası bulunamazsa temel stiller
+        st.markdown("""
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+# CSS'i yükle
+load_css()
 
 # YENİ: Oturum durumu için başlangıç değerlerini ayarlayan fonksiyon
 def initialize_session_state_defaults():
@@ -79,8 +102,6 @@ initialize_session_state_defaults() # Sayfa yüklenirken varsayılan değerleri 
 
 # YENİ: config.yaml yerine Streamlit Secrets kullanarak authenticator yapılandırması
 # Eğer config.yaml dosyası yoksa, varsayılan yapılandırma oluştur
-import os
-
 config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
 
 if os.path.exists(config_path):

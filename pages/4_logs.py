@@ -19,6 +19,11 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+# 🎨 GLOBAL CSS YÜKLEME
+from utils.style_loader import load_global_css
+load_global_css()
+
+
 try:
     from operations.log_manager import LogManager, log_manager
     LOG_MANAGER_AVAILABLE = True

@@ -6,16 +6,17 @@ import queue
 import time
 import pandas as pd
 from datetime import timedelta
+import sys
+import os
 
-# CSS'i yükle
-def load_css():
-    try:
-        with open("style.css", encoding='utf-8') as f:
-            st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
-    except FileNotFoundError:
-        pass
-    except UnicodeDecodeError:
-        st.error("CSS dosyası encoding hatası. UTF-8 formatında kaydedildiğinden emin olun.")
+# Projenin ana dizinini Python'un arama yoluna ekle
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+# 🎨 GLOBAL CSS YÜKLEME
+from utils.style_loader import load_global_css
+load_global_css()
 
 # YENİ: Arka plandaki ana senkronizasyon fonksiyonlarını yeni runner dosyasından içe aktarıyoruz.
 # sync_runner.py dosyasında, bu sayfanın bozulmaması için orijinal fonksiyon isimleri korunmuştur.

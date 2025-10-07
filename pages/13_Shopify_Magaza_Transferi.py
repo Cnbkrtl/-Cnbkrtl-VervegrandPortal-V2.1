@@ -1,4 +1,4 @@
-# pages/4_Shopify_Magaza_Transferi.py
+# pages/13_Shopify_Magaza_Transferi.py
 
 import streamlit as st
 from datetime import datetime, timedelta
@@ -13,6 +13,9 @@ from connectors.shopify_api import ShopifyAPI
 from operations.shopify_to_shopify import transfer_order
 from config_manager import load_all_user_keys
 
+# 🎨 GLOBAL CSS YÜKLEME
+from utils.style_loader import load_global_css
+load_global_css()
 st.set_page_config(layout="wide")
 st.title("🚚 Shopify Mağazaları Arası Sipariş Transferi")
 

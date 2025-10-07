@@ -18,6 +18,10 @@ if project_root not in sys.path:
 from connectors.shopify_api import ShopifyAPI
 from connectors.sentos_api import SentosAPI
 
+# 🎨 GLOBAL CSS YÜKLEME
+from utils.style_loader import load_global_css
+load_global_css()
+
 # Dashboard helper fonksiyonları - local olarak tanımla
 def get_sync_history_stats():
     """Sync history dosyasından sistem metriklerini çıkarır"""

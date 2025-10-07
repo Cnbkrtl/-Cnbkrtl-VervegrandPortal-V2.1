@@ -18,6 +18,11 @@ sys.path = [p for p in sys.path if (p == '' or (os.path.exists(p) and os.path.is
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+# 🎨 GLOBAL CSS YÜKLEME
+from utils.style_loader import load_global_css
+load_global_css()
+
+
 # Import işlemleri
 try:
     # Standart importlar
