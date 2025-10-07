@@ -2,6 +2,13 @@
 
 import logging
 import time
+import sys
+import os
+
+# Proje kök dizinini Python path'ine ekle
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 def sync_media(shopify_api, sentos_api, product_gid, sentos_product, set_alt_text=False, force_update=False):
     """

@@ -4,9 +4,16 @@ import logging
 import threading
 import time
 import json
+import sys
+import os
 from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import traceback
+
+# Proje kök dizinini Python path'ine ekle (güvenlik için)
+project_root = os.path.abspath(os.path.dirname(__file__))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from connectors.shopify_api import ShopifyAPI
 from connectors.sentos_api import SentosAPI

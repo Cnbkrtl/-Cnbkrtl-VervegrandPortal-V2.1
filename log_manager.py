@@ -41,3 +41,23 @@ def save_log(sync_results):
             json.dump(logs, f, indent=2, ensure_ascii=False)
     except IOError as e:
         print(f"Log dosyası kaydedilirken hata oluştu: {e}")
+
+
+# --- Sınıf Wrapper (Geriye dönük uyumluluk için) ---
+class LogManager:
+    """
+    Log işlemleri için wrapper sınıfı.
+    Yukarıdaki fonksiyonları sınıf metodları olarak sarmallar.
+    """
+    
+    def __init__(self, log_file=LOG_FILE):
+        """LogManager'ı başlat"""
+        self.log_file = log_file
+    
+    def load_logs(self):
+        """Log yükleme metodunun wrapper'ı"""
+        return load_logs()
+    
+    def save_log(self, sync_results):
+        """Log kaydetme metodunun wrapper'ı"""
+        return save_log(sync_results)

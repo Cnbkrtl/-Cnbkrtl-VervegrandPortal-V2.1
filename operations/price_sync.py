@@ -7,6 +7,13 @@ import time
 import random
 import threading
 from collections import deque
+import sys
+import os
+
+# Proje kök dizinini Python path'ine ekle
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 class SmartRateLimiter:
     """10 worker için optimize edilmiş akıllı rate limiter"""

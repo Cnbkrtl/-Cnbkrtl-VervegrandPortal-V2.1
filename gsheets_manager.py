@@ -129,3 +129,29 @@ def load_pricing_data_from_gsheets():
     except Exception as e:
         st.error(f"Google E-Tablolardan veri okunurken bir hata oluştu: {e}")
         return None, None
+
+
+# --- Sınıf Wrapper (Geriye dönük uyumluluk için) ---
+class GoogleSheetsManager:
+    """
+    Google Sheets işlemleri için wrapper sınıfı.
+    Yukarıdaki fonksiyonları sınıf metodları olarak sarmallar.
+    """
+    
+    def __init__(self):
+        """GoogleSheetsManager'ı başlat"""
+        self.client = None
+    
+    def get_client(self):
+        """Google Sheets client'ı döndür"""
+        if self.client is None:
+            self.client = get_gsheet_client()
+        return self.client
+    
+    def save_data(self, main_df, discount_df, wholesale_df, variants_df):
+        """Veri kaydetme metodunun wrapper'ı"""
+        return save_pricing_data_to_gsheets(main_df, discount_df, wholesale_df, variants_df)
+    
+    def load_data(self):
+        """Veri yükleme metodunun wrapper'ı"""
+        return load_pricing_data_from_gsheets()
