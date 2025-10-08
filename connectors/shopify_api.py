@@ -347,7 +347,7 @@ class ShopifyAPI:
                 totalTaxSet { shopMoney { amount currencyCode } }
                 totalDiscountsSet { shopMoney { amount currencyCode } }
 
-                lineItems(first: 50) {
+                lineItems(first: 250) {
                   nodes {
                     id
                     title
@@ -433,6 +433,12 @@ class ShopifyAPI:
 
     def create_order(self, order_input):
         """YENİ: Verilen bilgilerle yeni bir sipariş oluşturur - Doğru GraphQL type ve field'lar ile."""
+        # Gönderilen line item sayısını kaydet (doğrulama için)
+        input_line_items_count = len(order_input.get('lineItems', []))
+        input_total_quantity = sum(item.get('quantity', 0) for item in order_input.get('lineItems', []))
+        
+        logging.info(f"📦 Sipariş oluşturuluyor: {input_line_items_count} adet ürün modeli, toplam {input_total_quantity} adet")
+        
         # Shopify'ın güncel API'sine göre doğru type: OrderCreateOrderInput!
         mutation = """
         mutation orderCreate($order: OrderCreateOrderInput!) {
@@ -454,6 +460,18 @@ class ShopifyAPI:
                 city
                 country
               }
+              lineItems(first: 250) {
+                edges {
+                  node {
+                    id
+                    quantity
+                    title
+                    variant {
+                      sku
+                    }
+                  }
+                }
+              }
             }
             userErrors {
               field
@@ -472,6 +490,43 @@ class ShopifyAPI:
         order = result.get('orderCreate', {}).get('order', {})
         if not order:
             raise Exception("Sipariş oluşturuldu ancak sipariş bilgileri alınamadı")
+        
+        # ✅ KRİTİK DOĞRULAMA: Oluşturulan siparişte tüm ürünler var mı kontrol et
+        created_line_items = order.get('lineItems', {}).get('edges', [])
+        created_items_count = len(created_line_items)
+        created_total_quantity = sum(edge['node'].get('quantity', 0) for edge in created_line_items)
+        
+        logging.info(f"✅ Sipariş oluşturuldu: {created_items_count} adet ürün modeli, toplam {created_total_quantity} adet")
+        
+        # Eğer oluşturulan ürün sayısı gönderilenden azsa HATA ver
+        if created_items_count < input_line_items_count:
+            missing_count = input_line_items_count - created_items_count
+            error_msg = (
+                f"❌ KRİTİK HATA: Sipariş KISMÎ oluşturuldu!\n"
+                f"Gönderilen: {input_line_items_count} ürün modeli ({input_total_quantity} adet)\n"
+                f"Oluşturulan: {created_items_count} ürün modeli ({created_total_quantity} adet)\n"
+                f"EKSIK: {missing_count} ürün modeli ({input_total_quantity - created_total_quantity} adet)\n"
+                f"Sipariş ID: {order.get('id')}\n"
+                f"Sipariş No: {order.get('name')}"
+            )
+            logging.error(error_msg)
+            raise Exception(error_msg)
+        
+        # Miktar kontrolü de yap
+        if created_total_quantity < input_total_quantity:
+            missing_qty = input_total_quantity - created_total_quantity
+            error_msg = (
+                f"❌ KRİTİK HATA: Sipariş ürün sayıları eksik!\n"
+                f"Gönderilen toplam adet: {input_total_quantity}\n"
+                f"Oluşturulan toplam adet: {created_total_quantity}\n"
+                f"EKSIK: {missing_qty} adet\n"
+                f"Sipariş ID: {order.get('id')}\n"
+                f"Sipariş No: {order.get('name')}"
+            )
+            logging.error(error_msg)
+            raise Exception(error_msg)
+        
+        logging.info(f"✅ DOĞRULAMA BAŞARILI: Tüm ürünler eksiksiz aktarıldı ({created_items_count}/{input_line_items_count} model, {created_total_quantity}/{input_total_quantity} adet)")
             
         return order  
 

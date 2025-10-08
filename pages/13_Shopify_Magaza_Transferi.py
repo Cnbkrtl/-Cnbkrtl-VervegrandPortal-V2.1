@@ -282,6 +282,13 @@ if 'confirm_transfer' in st.session_state and st.session_state['confirm_transfer
         if st.button("✅ Evet, Transfer Et", type="primary", use_container_width=True):
             st.session_state['start_transfer'] = True
             st.session_state['confirm_transfer'] = False
+            # Transfer için seçili siparişleri KALICI kaydet
+            st.session_state['orders_to_transfer'] = [
+                order for order in st.session_state['fetched_orders'] 
+                if order['id'] in st.session_state['selected_order_ids']
+            ]
+            # Seçimleri temizle (yeni seçim yapılmasını önle)
+            st.session_state['selected_order_ids'] = set()
             st.rerun()
     with col2:
         if st.button("❌ İptal", use_container_width=True):
@@ -293,10 +300,13 @@ if 'start_transfer' in st.session_state and st.session_state['start_transfer']:
     st.markdown("---")
     st.header("📊 Adım 4: Transfer Sonuçları")
     
-    selected_orders = [
-        order for order in st.session_state['fetched_orders'] 
-        if order['id'] in st.session_state['selected_order_ids']
-    ]
+    # Transfer edilecek siparişleri AL (onay anında kaydedilmiş)
+    selected_orders = st.session_state.get('orders_to_transfer', [])
+    
+    if not selected_orders:
+        st.error("❌ Transfer edilecek sipariş bulunamadı!")
+        st.session_state['start_transfer'] = False
+        st.rerun()
     
     progress_bar = st.progress(0)
     total_orders = len(selected_orders)
@@ -313,14 +323,26 @@ if 'start_transfer' in st.session_state and st.session_state['start_transfer']:
             status_placeholder.container().write(f"**Sipariş {order['name']} Aktarım Logları:**")
             
             has_error = False
+            has_warning = False
+            transfer_quality = result.get('transfer_quality', 100)
+            
             for log in result.get('logs', []):
-                if "✅" in log or "BAŞARILI" in log:
+                if "✅" in log or "BAŞARILI" in log or "MÜKEMMEL" in log:
                     st.success(log)
-                elif "❌" in log or "HATA" in log:
+                elif "❌" in log or "HATA" in log or "KRİTİK" in log:
                     st.error(log)
                     has_error = True
+                elif "⚠️" in log or "UYARI" in log or "DİKKAT" in log:
+                    st.warning(log)
+                    has_warning = True
+                elif "═" in log:
+                    st.markdown(f"`{log}`")
                 else:
-                    st.write(log)
+                    st.info(log)
+            
+            # Transfer kalitesi göstergesi
+            if transfer_quality < 100:
+                st.warning(f"⚠️ Transfer Kalitesi: %{transfer_quality:.1f} - Bazı ürünler eksik!")
             
             if has_error:
                 failed_count += 1
@@ -328,6 +350,10 @@ if 'start_transfer' in st.session_state and st.session_state['start_transfer']:
                 success_count += 1
         
         progress_bar.progress((i + 1) / total_orders)
+    
+    # ✅ Transfer tamamlandı - flag'i TEMİZLE
+    st.session_state['start_transfer'] = False
+    st.session_state['transfer_completed'] = True
     
     # Özet
     st.markdown("---")
@@ -349,8 +375,8 @@ if 'start_transfer' in st.session_state and st.session_state['start_transfer']:
     # Yeni transfer butonu
     st.markdown("---")
     if st.button("🔄 Yeni Transfer İşlemi", use_container_width=True, type="primary"):
-        # Session state'i temizle
-        for key in ['fetched_orders', 'selected_order_ids', 'confirm_transfer', 'start_transfer']:
+        # Session state'i TEMİZLE
+        for key in ['fetched_orders', 'selected_order_ids', 'confirm_transfer', 'start_transfer', 'transfer_completed', 'orders_to_transfer']:
             if key in st.session_state:
                 del st.session_state[key]
         st.rerun()
@@ -373,8 +399,34 @@ with st.expander("❓ Nasıl Kullanılır?"):
     - Seçtiğiniz siparişleri transfer etmek için "Siparişi Transfer Et" butonuna tıklayın
     - Onay ekranında "Evet, Transfer Et" ile işlemi başlatın
     
+    **⚠️ ÖNEMLİ NOTLAR:**
+    
+    **1. Ürün Eşleştirme Problemi:**
+    - Siparişteki ürünler **SKU** ile eşleştirilir
+    - Eğer hedef mağazada ürün yoksa, o ürün **atlanır**
+    - Bu durumda sipariş **eksik** oluşturulur!
+    
+    **2. Eksik Transfer Önleme:**
+    - ✅ Transfer öncesi tüm ürünlerin hedef mağazada olduğundan emin olun
+    - ✅ SKU'ların her iki mağazada da **aynı** olduğunu kontrol edin
+    - ✅ Transfer loglarında "❌ HATA: SKU bulunamadı" uyarılarını kontrol edin
+    
+    **3. Transfer Kalitesi:**
+    - Her sipariş için **Transfer Kalitesi** gösterilir
+    - %100 = Tüm ürünler başarıyla transfer edildi ✅
+    - %80-99 = Bazı ürünler eksik ⚠️
+    - %0-79 = Çok fazla ürün eksik ❌
+    
+    **4. Sorun Giderme:**
+    - Eğer ürünler eksik transfer edildiyse:
+      1. Transfer loglarını kontrol edin
+      2. Eksik SKU'ları not alın
+      3. Bu ürünleri hedef mağazada oluşturun
+      4. Siparişi tekrar transfer edin
+    
     **İpuçları:**
     - ✅ İlk transferden sonra, aynı gün içinde gelen yeni siparişleri seçerek transfer edebilirsiniz
     - ✅ Her sipariş için detaylı transfer logları görüntülenir
     - ✅ Başarılı ve başarısız transferlerin özeti gösterilir
+    - ✅ Transfer kalitesi %100'den düşükse mutlaka logları kontrol edin!
     """)

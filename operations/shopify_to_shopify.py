@@ -27,17 +27,33 @@ def map_line_items(destination_api, source_line_items):
     line_items_for_creation = []
     logs = []
     
+    # İstatistik tutma
+    total_items = len(source_line_items)
+    matched_items = 0
+    unmatched_items = 0
+    total_source_quantity = 0
+    total_matched_quantity = 0
+    total_source_value = 0.0
+    total_matched_value = 0.0
+    
     for item in source_line_items:
+        quantity = item.get('quantity', 0)
+        original_price = float(item.get('originalUnitPriceSet', {}).get('shopMoney', {}).get('amount', '0'))
+        item_value = quantity * original_price
+        total_source_quantity += quantity
+        total_source_value += item_value
+        
         sku = (item.get('variant') or {}).get('sku')
         if not sku:
-            logs.append(f"UYARI: '{item.get('title')}' ürününde SKU bulunamadı, siparişe eklenemiyor.")
+            logs.append(f"⚠️ UYARI: '{item.get('title')}' ürününde SKU bulunamadı, siparişe eklenemiyor.")
+            logs.append(f"   └─ Atlanıyor: {quantity} adet, ₺{item_value:.2f}")
+            unmatched_items += 1
             continue
         
         variant_id = destination_api.find_variant_id_by_sku(sku)
         if variant_id:
             # İndirimli fiyatı hesapla
             # discountedTotal = originalUnitPrice - discountAllocations
-            original_price = float(item.get('originalUnitPriceSet', {}).get('shopMoney', {}).get('amount', '0'))
             discounted_price = float(item.get('discountedUnitPriceSet', {}).get('shopMoney', {}).get('amount', '0'))
             
             # Eğer indirimli fiyat yoksa, orijinal fiyatı kullan
@@ -45,7 +61,7 @@ def map_line_items(destination_api, source_line_items):
             
             line_item = {
                 "variantId": variant_id,
-                "quantity": item.get('quantity')
+                "quantity": quantity
             }
             
             # Eğer indirimli fiyat varsa, onu da ekle (para birimi ile birlikte)
@@ -62,9 +78,51 @@ def map_line_items(destination_api, source_line_items):
                 logs.append(f"  📋 Ürün '{item.get('title')}' için {len(custom_attrs)} özel alan eklendi")
             
             line_items_for_creation.append(line_item)
-            logs.append(f"Ürün eşleştirildi: SKU {sku}, Miktar: {item.get('quantity')}, Fiyat: ₺{final_price:.2f}")
+            logs.append(f"✅ Eşleştirildi: '{item.get('title')}' - SKU: {sku}, Miktar: {quantity}, Fiyat: ₺{final_price:.2f}")
+            
+            matched_items += 1
+            total_matched_quantity += quantity
+            total_matched_value += (quantity * final_price)
         else:
-            logs.append(f"HATA: SKU '{sku}' hedef mağazada bulunamadı.")
+            logs.append(f"❌ HATA: SKU '{sku}' hedef mağazada bulunamadı!")
+            logs.append(f"   ├─ Ürün: '{item.get('title')}'")
+            logs.append(f"   ├─ Miktar: {quantity} adet")
+            logs.append(f"   ├─ Birim Fiyat: ₺{original_price:.2f}")
+            logs.append(f"   └─ Toplam Değer: ₺{item_value:.2f}")
+            unmatched_items += 1
+    
+    # Özet istatistikler
+    logs.insert(0, "")
+    logs.insert(0, "═" * 60)
+    logs.insert(0, f"📊 ÜRÜN EŞLEŞTİRME ÖZETİ:")
+    logs.insert(0, "═" * 60)
+    logs.append("")
+    logs.append("═" * 60)
+    logs.append(f"📦 KAYNAK SİPARİŞ:")
+    logs.append(f"   ├─ Toplam Ürün Çeşidi: {total_items}")
+    logs.append(f"   ├─ Toplam Adet: {total_source_quantity}")
+    logs.append(f"   └─ Toplam Değer: ₺{total_source_value:.2f}")
+    logs.append("")
+    logs.append(f"✅ EŞLEŞTİRİLEN:")
+    logs.append(f"   ├─ Ürün Çeşidi: {matched_items}")
+    logs.append(f"   ├─ Toplam Adet: {total_matched_quantity}")
+    logs.append(f"   └─ Toplam Değer: ₺{total_matched_value:.2f}")
+    logs.append("")
+    logs.append(f"❌ EŞLEŞTİRİLEMEYEN:")
+    logs.append(f"   ├─ Ürün Çeşidi: {unmatched_items}")
+    logs.append(f"   ├─ Eksik Adet: {total_source_quantity - total_matched_quantity}")
+    logs.append(f"   └─ Eksik Değer: ₺{(total_source_value - total_matched_value):.2f}")
+    logs.append("═" * 60)
+    
+    # Eğer hiçbir ürün eşleşmezse uyarı ver
+    if matched_items == 0:
+        logs.append("")
+        logs.append("⚠️⚠️⚠️ KRİTİK UYARI: Siparişteki hiçbir ürün eşleştirilemedi!")
+        logs.append("Lütfen hedef mağazada ürünlerin mevcut olduğundan emin olun.")
+    elif unmatched_items > 0:
+        logs.append("")
+        logs.append(f"⚠️ UYARI: {unmatched_items} ürün eşleştirilemedi, eksik transfer yapılacak!")
+        logs.append("Yukarıdaki SKU'ları kontrol edin ve hedef mağazada oluşturun.")
             
     return line_items_for_creation, logs
 
@@ -321,12 +379,77 @@ def transfer_order(source_api, destination_api, order_data):
         # Safe builder ile OrderCreateOrderInput oluştur
         order_input = builder['build_order_input'](order_data_for_creation)
         
-        new_order = destination_api.create_order(order_input)
-        log_messages.append(f"✅ BAŞARILI: Sipariş, hedef mağazada '{new_order.get('name')}' numarasıyla oluşturuldu.")
+        # Sipariş oluştur ve DOĞRULAMA yap
+        try:
+            new_order = destination_api.create_order(order_input)
+        except Exception as create_error:
+            # create_order metodunda zaten doğrulama yapılıyor
+            # Eğer kısmi aktarım varsa exception fırlatır
+            log_messages.append("")
+            log_messages.append("═" * 60)
+            log_messages.append("❌ SİPARİŞ OLUŞTURMA HATASI")
+            log_messages.append("═" * 60)
+            log_messages.append(f"Hata: {str(create_error)}")
+            log_messages.append("")
+            log_messages.append("💡 SORUN:")
+            log_messages.append("Sipariş kısmen oluşturuldu veya bazı ürünler eksik kaldı.")
+            log_messages.append("Bu sipariş TAMAMLANMAMIŞ sayılır ve işlem iptal edildi.")
+            log_messages.append("")
+            log_messages.append("💡 ÇÖZÜM:")
+            log_messages.append("1. Hedef mağazada TÜM ürünlerin mevcut olduğundan emin olun")
+            log_messages.append("2. SKU'ların kaynak ve hedef mağazada TAM AYNI olduğunu kontrol edin")
+            log_messages.append("3. Ürün varyantlarının aktif olduğunu kontrol edin")
+            log_messages.append("4. Shopify API limitlerini kontrol edin (çok büyük siparişlerde)")
+            log_messages.append("═" * 60)
+            raise create_error  # Hatayı yukarı fırlat
         
-        return {"success": True, "logs": log_messages, "new_order_name": new_order.get('name')}
+        # Transfer başarılı mesajı
+        log_messages.append("")
+        log_messages.append("═" * 60)
+        log_messages.append("✅ SİPARİŞ BAŞARIYLA OLUŞTURULDU")
+        log_messages.append("═" * 60)
+        log_messages.append(f"📝 Hedef Sipariş No: {new_order.get('name')}")
+        log_messages.append(f"🔗 Kaynak Sipariş No: {order_data.get('name')}")
+        
+        # Transfer kalitesi değerlendirmesi
+        source_line_count = len(order_data.get('lineItems', {}).get('nodes', []))
+        transferred_line_count = len(line_items)
+        transfer_ratio = (transferred_line_count / source_line_count * 100) if source_line_count > 0 else 0
+        
+        log_messages.append("")
+        log_messages.append("📊 TRANSFER KALİTESİ:")
+        log_messages.append(f"   ├─ Kaynak Ürün Çeşidi: {source_line_count}")
+        log_messages.append(f"   ├─ Transfer Edilen: {transferred_line_count}")
+        log_messages.append(f"   └─ Başarı Oranı: %{transfer_ratio:.1f}")
+        
+        if transfer_ratio == 100:
+            log_messages.append("")
+            log_messages.append("🎉 MÜKEMMEL! Tüm ürünler başarıyla transfer edildi!")
+        elif transfer_ratio >= 80:
+            log_messages.append("")
+            log_messages.append("✅ İYİ! Çoğu ürün transfer edildi.")
+            log_messages.append(f"⚠️  {source_line_count - transferred_line_count} ürün eksik - yukarıdaki SKU'ları kontrol edin.")
+        else:
+            log_messages.append("")
+            log_messages.append("⚠️⚠️⚠️ DİKKAT! Çok fazla ürün eksik!")
+            log_messages.append(f"❌ {source_line_count - transferred_line_count} ürün transfer edilemedi!")
+            log_messages.append("Lütfen hedef mağazada bu ürünleri oluşturun ve siparişi tekrar transfer edin.")
+        
+        log_messages.append("═" * 60)
+        
+        return {"success": True, "logs": log_messages, "new_order_name": new_order.get('name'), "transfer_quality": transfer_ratio}
 
     except Exception as e:
         logging.error(f"Sipariş aktarımında kritik hata: {e}", exc_info=True)
-        log_messages.append(f"❌ KRİTİK HATA: {str(e)}")
+        log_messages.append("")
+        log_messages.append("═" * 60)
+        log_messages.append("❌ SİPARİŞ TRANSFER HATASI")
+        log_messages.append("═" * 60)
+        log_messages.append(f"Hata: {str(e)}")
+        log_messages.append("")
+        log_messages.append("💡 ÖNERİLER:")
+        log_messages.append("1. Hedef mağazada ürünlerin mevcut olduğundan emin olun")
+        log_messages.append("2. SKU'ların her iki mağazada da aynı olduğunu kontrol edin")
+        log_messages.append("3. Müşteri bilgilerinin doğru olduğunu kontrol edin")
+        log_messages.append("═" * 60)
         return {"success": False, "logs": log_messages}
