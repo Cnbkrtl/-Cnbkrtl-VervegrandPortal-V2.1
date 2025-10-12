@@ -25,14 +25,16 @@ class ShopifyAPI:
         self.product_cache = {}
         self.location_id = None
         
-        # Geri kalan kodlar aynı
+        # ✅ Shopify 2024-10 Rate Limits (daha konservatif)
+        # Shopify GraphQL Cost: 1000 points/sec, 50 cost avg/query = ~20 queries/sec max
+        # Ancak burst'ü önlemek için daha düşük limit kullanıyoruz
         self.last_request_time = 0
-        self.min_request_interval = 0.4
+        self.min_request_interval = 0.6  # 0.4'ten 0.6'ya çıkarıldı
         self.request_count = 0
         self.window_start = time.time()
-        self.max_requests_per_minute = 40
-        self.burst_tokens = 10
-        self.current_tokens = 10
+        self.max_requests_per_minute = 30  # 40'tan 30'a düşürüldü
+        self.burst_tokens = 5  # 10'dan 5'e düşürüldü (burst koruması)
+        self.current_tokens = 5  # Başlangıç token sayısı da 5
 
     def _rate_limit_wait(self):
         """
@@ -58,8 +60,8 @@ class ShopifyAPI:
         wait_time = (1 - self.current_tokens) / (self.max_requests_per_minute / 60.0)
         
         # ✅ Adaptive Throttling: Eğer sürekli bekleniyorsa, rate'i azalt
-        if wait_time > 2.0:  # 2 saniyeden fazla bekleme gerektiriyorsa
-            wait_time = min(wait_time * 1.2, 5.0)  # Maksimum 5 saniye
+        if wait_time > 1.5:  # 2.0'dan 1.5'e düşürüldü (daha erken müdahale)
+            wait_time = min(wait_time * 1.5, 8.0)  # Maksimum 8 saniye (5'ten 8'e çıkarıldı)
             logging.warning(f"⚠️ Adaptive throttling aktif: {wait_time:.2f}s bekleniyor")
         
         time.sleep(wait_time)
@@ -96,8 +98,8 @@ class ShopifyAPI:
     def execute_graphql(self, query, variables=None):
         """GraphQL sorgusunu çalıştırır - gelişmiş hata yönetimi ile."""
         payload = {'query': query, 'variables': variables or {}}
-        max_retries = 8
-        retry_delay = 2
+        max_retries = 10  # 8'den 10'a çıkarıldı
+        retry_delay = 3  # 2'den 3'e çıkarıldı (daha uzun bekleme)
         
         # Debug için sorgu bilgilerini logla
         logging.debug(f"GraphQL Query: {query[:100]}...")
@@ -119,9 +121,12 @@ class ShopifyAPI:
                         for err in errors
                     )
                     if is_throttled and attempt < max_retries - 1:
-                        wait_time = retry_delay * (2 ** attempt)
-                        logging.warning(f"GraphQL Throttled! {wait_time} saniye beklenip tekrar denenecek... (Deneme {attempt + 1}/{max_retries})")
+                        # ✅ Daha agresif exponential backoff
+                        wait_time = min(retry_delay * (2.5 ** attempt), 30)  # Max 30 saniye
+                        logging.warning(f"⚠️ GraphQL Throttled! {wait_time:.1f}s beklenecek... (Deneme {attempt + 1}/{max_retries})")
                         time.sleep(wait_time)
+                        # ✅ Token'ları sıfırla (rate limiter'ı da etkileyecek)
+                        self.current_tokens = 0
                         continue
                     
                     # Hata detaylarını logla
