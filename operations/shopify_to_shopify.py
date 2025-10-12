@@ -324,6 +324,11 @@ def transfer_order(source_api, destination_api, order_data):
             "taxesIncluded": True  # ÖNEMLİ: Fiyatlar vergi dahil
         }
         
+        # Kargo bilgisini ekle (eğer varsa)
+        if shipping_line:
+            order_data_for_creation["shippingLine"] = shipping_line
+            log_messages.append(f"  🚚 Kargo bilgisi sipariş verisine eklendi")
+        
         # Vergi bilgilerini ekle (eğer varsa)
         if tax > 0:
             tax_lines = []

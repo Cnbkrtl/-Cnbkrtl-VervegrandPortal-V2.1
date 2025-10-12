@@ -271,15 +271,13 @@ def create_order_input_builder():
             if tax_lines:
                 order_input["taxLines"] = tax_lines
         
-        # NOT: shippingLine OrderCreateOrderInput'ta DESTEKLENMIYOR!
-        # Shopify API 2024-10'da orderCreate mutation shippingLine field'ını kabul etmiyor.
-        # Kargo bilgisi sipariş oluşturulduktan SONRA eklenir veya
-        # line item fiyatlarına dahil edilir.
-        # shipping_line = order_data.get('shippingLine')
-        # if shipping_line:
-        #     shipping = build_shipping_line(shipping_line)
-        #     if shipping:
-        #         order_input["shippingLine"] = shipping  # ❌ ÇALIŞMAZ!
+        # Shipping Line (Kargo Bilgisi)
+        # Shopify API 2024-10'da orderCreate mutation shippingLine field'ını destekler
+        shipping_line = order_data.get('shippingLine')
+        if shipping_line:
+            shipping = build_shipping_line(shipping_line)
+            if shipping:
+                order_input["shippingLine"] = shipping
         
         # Tags (Etiketler)
         tags = order_data.get('tags')
