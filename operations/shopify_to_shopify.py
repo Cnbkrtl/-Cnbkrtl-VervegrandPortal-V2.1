@@ -314,6 +314,13 @@ def transfer_order(source_api, destination_api, order_data):
         if billing_addr.get('company') and billing_addr.get('company') != shipping_addr.get('company'):
             log_messages.append(f"🧾 Fatura Adresi - Şirket: {billing_addr.get('company')}")
         
+        # ⚠️ SHOPIFY KISITLAMASI: shippingLine orderCreate'te desteklenmiyor
+        # Çözüm: Kargo ücreti zaten toplam tutara (currentTotalPriceSet) dahil
+        # ve sipariş notuna ekleniyor. Shopify manuel sipariş olarak oluşturuyor.
+        if shipping_line and shipping_price > 0:
+            log_messages.append(f"  ℹ️ Kargo ücreti toplam tutara dahil: {shipping_title} - ₺{shipping_price:.2f}")
+            log_messages.append(f"  ℹ️ Shopify limitasyonu: Kargo ayrı satır olarak gösterilemiyor, toplam tutara dahil edildi")
+        
         order_data_for_creation = {
             "customerId": customer_id,
             "lineItems": line_items,
@@ -324,10 +331,26 @@ def transfer_order(source_api, destination_api, order_data):
             "taxesIncluded": True  # ÖNEMLİ: Fiyatlar vergi dahil
         }
         
-        # Kargo bilgisini ekle (eğer varsa)
-        if shipping_line:
-            order_data_for_creation["shippingLine"] = shipping_line
-            log_messages.append(f"  🚚 Kargo bilgisi sipariş verisine eklendi")
+        # ✅ TRANSACTION EKLE - Toplam tutarı belirlemek için
+        # shippingLine olmadan Shopify toplam tutarı doğru hesaplamıyor
+        # Transaction ile manuel olarak toplam tutarı belirtiyoruz
+        currency = order_data.get('currencyCode', 'TRY')
+        transaction = {
+            "gateway": payment_method if payment_method != "Bilinmiyor" else "manual",
+            "kind": "SALE",
+            "status": "SUCCESS" if financial_status == "Paid" else "PENDING",
+            "amountSet": {
+                "shopMoney": {
+                    "amount": total_amount,  # Kargo + vergi + ürünler dahil toplam
+                    "currencyCode": currency
+                }
+            }
+        }
+        order_data_for_creation["transactions"] = [transaction]
+        log_messages.append(f"  💳 Transaction eklendi: {transaction['gateway']} - ₺{total_amount} ({transaction['status']})")
+        
+        # ❌ shippingLine KALDIRILDI - OrderCreateOrderInput desteklemiyor!
+        # Kargo bilgisi sipariş notunda mevcut
         
         # Vergi bilgilerini ekle (eğer varsa)
         if tax > 0:
