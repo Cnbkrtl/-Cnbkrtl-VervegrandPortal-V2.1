@@ -277,3 +277,134 @@ class SentosAPI:
             stats['error'] = str(e)
         
         return stats
+    
+    def get_sales_orders(self, start_date=None, end_date=None, marketplace=None, status=None, 
+                        page=1, page_size=100, progress_callback=None):
+        """
+        Sentos'tan satış siparişlerini çeker - Sadece E-Ticaret kanalı
+        
+        Args:
+            start_date: Başlangıç tarihi (YYYY-MM-DD formatında)
+            end_date: Bitiş tarihi (YYYY-MM-DD formatında)
+            marketplace: Pazar yeri filtresi (örn: 'trendyol', 'hepsiburada')
+            status: Sipariş durumu filtresi
+            page: Sayfa numarası
+            page_size: Sayfa başına kayıt sayısı
+            progress_callback: İlerleme callback fonksiyonu
+            
+        Returns:
+            dict: {
+                'orders': [...],  # Sipariş listesi
+                'total': int,     # Toplam sipariş sayısı
+                'page': int,      # Mevcut sayfa
+                'total_pages': int  # Toplam sayfa sayısı
+            }
+        """
+        params = {
+            'page': page,
+            'size': page_size,
+            'sort': 'createdDate,desc',  # En yeni siparişler önce
+            'channel': 'ECOMMERCE'  # Sadece e-ticaret siparişleri
+        }
+        
+        # Tarih filtreleri
+        if start_date:
+            params['startDate'] = start_date
+        if end_date:
+            params['endDate'] = end_date
+            
+        # Pazar yeri filtresi
+        if marketplace:
+            params['marketplace'] = marketplace.upper()
+            
+        # Durum filtresi
+        if status:
+            params['status'] = status
+        
+        try:
+            endpoint = "/orders"
+            response = self._make_request("GET", endpoint, params=params).json()
+            
+            orders = response.get('data', [])
+            total_elements = response.get('total_elements', 0)
+            total_pages = response.get('total_pages', 1)
+            
+            if progress_callback:
+                progress_callback({
+                    'message': f"Sentos siparişleri çekiliyor... Sayfa {page}/{total_pages} ({len(orders)} sipariş)",
+                    'progress': int((page / total_pages) * 100) if total_pages > 0 else 0
+                })
+            
+            return {
+                'orders': orders,
+                'total': total_elements,
+                'page': page,
+                'total_pages': total_pages
+            }
+            
+        except Exception as e:
+            logging.error(f"Sentos siparişleri çekilirken hata: {e}")
+            raise Exception(f"Sentos API'den siparişler çekilemedi: {e}")
+    
+    def get_all_sales_orders(self, start_date=None, end_date=None, marketplace=None, 
+                            status=None, progress_callback=None, page_size=100):
+        """
+        Sentos'tan TÜM satış siparişlerini pagination ile çeker
+        
+        Args:
+            start_date: Başlangıç tarihi (YYYY-MM-DD)
+            end_date: Bitiş tarihi (YYYY-MM-DD)
+            marketplace: Pazar yeri filtresi
+            status: Sipariş durumu filtresi
+            progress_callback: İlerleme callback
+            page_size: Sayfa başına kayıt sayısı
+            
+        Returns:
+            list: Tüm siparişlerin listesi
+        """
+        all_orders = []
+        page = 1
+        total_pages = None
+        start_time = time.monotonic()
+        
+        while True:
+            try:
+                result = self.get_sales_orders(
+                    start_date=start_date,
+                    end_date=end_date,
+                    marketplace=marketplace,
+                    status=status,
+                    page=page,
+                    page_size=page_size,
+                    progress_callback=None  # Kendi callback'imizi kullanacağız
+                )
+                
+                orders = result.get('orders', [])
+                if not orders:
+                    break
+                
+                all_orders.extend(orders)
+                
+                if total_pages is None:
+                    total_pages = result.get('total_pages', 1)
+                
+                if progress_callback:
+                    elapsed_time = time.monotonic() - start_time
+                    progress_callback({
+                        'message': f"Sentos siparişleri çekiliyor... {len(all_orders)} / {result.get('total', 0)} (Sayfa {page}/{total_pages}) - {int(elapsed_time)}s",
+                        'progress': int((page / total_pages) * 100) if total_pages > 0 else 0
+                    })
+                
+                # Son sayfaya ulaştıysak dur
+                if page >= total_pages:
+                    break
+                
+                page += 1
+                time.sleep(0.3)  # Rate limiting
+                
+            except Exception as e:
+                logging.error(f"Sayfa {page} çekilirken hata: {e}")
+                raise Exception(f"Sentos siparişleri çekilemedi (Sayfa {page}): {e}")
+        
+        logging.info(f"Sentos'tan toplam {len(all_orders)} sipariş çekildi.")
+        return all_orders
