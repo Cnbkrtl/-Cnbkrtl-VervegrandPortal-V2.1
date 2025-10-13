@@ -39,14 +39,41 @@ try:
     
     if not all([sentos_url, sentos_key, sentos_secret]):
         st.error("❌ Sentos API bilgileri eksik. Lütfen ayarlar sayfasından yapılandırın.")
-        st.error(f"Debug: URL={sentos_url is not None}, Key={sentos_key is not None}, Secret={sentos_secret is not None}")
+        
+        # Debug bilgisi
+        with st.expander("🔍 Debug Bilgisi"):
+            st.write("API Bilgileri Durumu:")
+            st.write(f"- SENTOS_API_URL: {'✅ Tanımlı' if sentos_url else '❌ Eksik'}")
+            st.write(f"- SENTOS_API_KEY: {'✅ Tanımlı' if sentos_key else '❌ Eksik'}")
+            st.write(f"- SENTOS_API_SECRET: {'✅ Tanımlı' if sentos_secret else '❌ Eksik'}")
+            st.write(f"- SENTOS_COOKIE: {'✅ Tanımlı' if sentos_cookie else '⚠️ Opsiyonel'}")
+            
+            st.info("""
+            **Ayarlar Sayfasına Gitmek İçin:**
+            1. Sol menüden "Settings" (⚙️) sayfasını açın
+            2. Sentos API bilgilerini girin
+            3. "Kaydet" butonuna tıklayın
+            4. Bu sayfaya geri dönün
+            """)
         st.stop()
     
     sentos_api = SentosAPI(sentos_url, sentos_key, sentos_secret, sentos_cookie)
     analytics = SalesAnalytics(sentos_api)
     
+    # API bağlantı durumu göstergesi
+    st.sidebar.success("✅ Sentos API Bağlantısı Aktif")
+    
+    # Debug modu
+    if st.sidebar.checkbox("🔧 Debug Modu (Geliştirici)", value=False):
+        st.session_state['debug_mode'] = True
+    else:
+        st.session_state['debug_mode'] = False
+    
 except Exception as e:
     st.error(f"❌ API bağlantısı kurulamadı: {e}")
+    import traceback
+    with st.expander("🔍 Detaylı Hata Bilgisi"):
+        st.code(traceback.format_exc())
     st.stop()
 
 # --- Filtreler ---
@@ -141,13 +168,26 @@ if st.session_state.get('run_analysis', False):
         
         # Sonuçları session'a kaydet
         st.session_state['analysis_result'] = analysis_result
+        st.session_state['analysis_params'] = params  # Parametreleri de kaydet
         st.session_state['run_analysis'] = False
         
         st.success("✅ Analiz tamamlandı!")
         st.rerun()
         
     except Exception as e:
-        st.error(f"❌ Analiz sırasında hata oluştu: {e}")
+        st.error(f"❌ Analiz sırasında hata oluştu: {str(e)}")
+        
+        # Detaylı hata bilgisi
+        import traceback
+        with st.expander("🔍 Detaylı Hata Bilgisi"):
+            st.code(traceback.format_exc())
+            st.write("**API Parametreleri:**")
+            st.json({
+                'start_date': params['start_date'],
+                'end_date': params['end_date'],
+                'marketplace': params['marketplace']
+            })
+        
         progress_container.empty()
         status_text.empty()
         st.session_state['run_analysis'] = False
@@ -155,12 +195,25 @@ if st.session_state.get('run_analysis', False):
 # --- Sonuçları Göster ---
 if 'analysis_result' in st.session_state:
     result = st.session_state['analysis_result']
+    params = st.session_state.get('analysis_params', {})
     summary = result['summary']
     by_marketplace = result['by_marketplace']
     by_date = result['by_date']
     by_product = result['by_product']
     returns = result['returns']
     profitability = result['profitability']
+    
+    # Debug modu - Ham veri göster
+    if st.session_state.get('debug_mode', False):
+        with st.expander("🔍 DEBUG: Ham Analiz Sonuçları"):
+            st.subheader("Pazar Yeri Verileri")
+            st.json(by_marketplace)
+            
+            st.subheader("İlk 3 Ürün")
+            st.json(dict(list(by_product.items())[:3]))
+            
+            st.subheader("Özet")
+            st.json(summary)
     
     # --- ÖZET KARTLARı ---
     st.header("📋 Genel Özet")
@@ -563,6 +616,10 @@ if 'analysis_result' in st.session_state:
     st.divider()
     st.subheader("📥 Rapor İndirme")
     
+    # Dosya adı için tarih bilgisi
+    start_date_str = params.get('start_date', 'baslangic')
+    end_date_str = params.get('end_date', 'bitis')
+    
     col1, col2 = st.columns(2)
     
     with col1:
@@ -571,7 +628,7 @@ if 'analysis_result' in st.session_state:
         st.download_button(
             label="📊 Özet Rapor (CSV)",
             data=summary_csv,
-            file_name=f"satis_ozet_{params['start_date']}_{params['end_date']}.csv",
+            file_name=f"satis_ozet_{start_date_str}_{end_date_str}.csv",
             mime="text/csv"
         )
     
@@ -599,7 +656,7 @@ if 'analysis_result' in st.session_state:
             st.download_button(
                 label="📦 Ürün Detay Raporu (CSV)",
                 data=product_csv,
-                file_name=f"satis_urun_detay_{params['start_date']}_{params['end_date']}.csv",
+                file_name=f"satis_urun_detay_{start_date_str}_{end_date_str}.csv",
                 mime="text/csv"
             )
 

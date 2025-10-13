@@ -225,34 +225,99 @@ class SalesAnalytics:
     def _process_order(self, order, summary, by_marketplace, by_date, by_product):
         """Tek bir siparişi işler ve istatistiklere ekler"""
         
-        # Temel bilgiler
-        order_status = order.get('status', 'UNKNOWN')
-        marketplace = order.get('marketplace', 'UNKNOWN')
-        order_date = order.get('createdDate', '')[:10]  # YYYY-MM-DD formatına çevir
+        # Debug: İlk siparişin yapısını logla
+        if summary['total_orders'] == 0:
+            logging.info(f"Örnek sipariş yapısı: {order}")
+        
+        # Temel bilgiler - Sentos API field isimleri
+        order_status = order.get('status', order.get('orderStatus', 'UNKNOWN'))
+        
+        # Marketplace için farklı olası field isimlerini kontrol et
+        marketplace = (
+            order.get('marketplace') or 
+            order.get('marketPlace') or 
+            order.get('channel') or 
+            order.get('salesChannel') or
+            'UNKNOWN'
+        )
+        
+        # Tarih için farklı olası field isimlerini kontrol et
+        order_date = (
+            order.get('createdDate') or 
+            order.get('orderDate') or 
+            order.get('date') or
+            ''
+        )
+        if order_date and len(order_date) >= 10:
+            order_date = order_date[:10]  # YYYY-MM-DD formatına çevir
+        else:
+            order_date = 'UNKNOWN'
         
         # İade mi kontrol et
-        is_return = order_status in ['RETURNED', 'CANCELLED', 'REFUNDED']
+        is_return = order_status.upper() in ['RETURNED', 'CANCELLED', 'REFUNDED', 'IPTAL', 'IADE']
         
         # Sipariş sayısı
         summary['total_orders'] += 1
         by_marketplace[marketplace]['order_count'] += 1
         by_date[order_date]['order_count'] += 1
         
-        # Sipariş kalemleri
-        items = order.get('items', [])
+        # Sipariş kalemleri - Farklı olası field isimlerini kontrol et
+        items = (
+            order.get('items') or 
+            order.get('orderItems') or 
+            order.get('products') or 
+            []
+        )
+        
         for item in items:
-            quantity = item.get('quantity', 0)
-            unit_price = float(item.get('unitPrice', 0))
-            item_total = float(item.get('totalPrice', quantity * unit_price))
+            # Miktar
+            quantity = (
+                item.get('quantity') or 
+                item.get('qty') or 
+                item.get('amount') or 
+                0
+            )
+            
+            # Birim fiyat
+            unit_price = float(
+                item.get('unitPrice') or 
+                item.get('price') or 
+                item.get('salePrice') or 
+                0
+            )
+            
+            # Toplam fiyat
+            item_total = float(
+                item.get('totalPrice') or 
+                item.get('total') or 
+                (quantity * unit_price)
+            )
             
             # Maliyet bilgisi (eğer varsa)
-            unit_cost = float(item.get('unitCost', 0))
+            unit_cost = float(
+                item.get('unitCost') or 
+                item.get('cost') or 
+                item.get('buyPrice') or 
+                0
+            )
             total_cost = unit_cost * quantity
             
             # Ürün bilgileri
-            product_name = item.get('productName', 'Bilinmeyen Ürün')
-            sku = item.get('sku', '')
-            product_key = f"{sku}_{product_name}"
+            product_name = (
+                item.get('productName') or 
+                item.get('name') or 
+                item.get('title') or 
+                'Bilinmeyen Ürün'
+            )
+            
+            sku = (
+                item.get('sku') or 
+                item.get('productCode') or 
+                item.get('barcode') or 
+                ''
+            )
+            
+            product_key = f"{sku}_{product_name}" if sku else product_name
             
             if not by_product[product_key]['product_name']:
                 by_product[product_key]['product_name'] = product_name
