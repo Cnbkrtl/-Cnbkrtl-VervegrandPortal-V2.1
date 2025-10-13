@@ -205,14 +205,38 @@ if 'analysis_result' in st.session_state:
     
     # Debug modu - Ham veri göster
     if st.session_state.get('debug_mode', False):
-        with st.expander("🔍 DEBUG: Ham Analiz Sonuçları"):
+        with st.expander("🔍 DEBUG: Ham Analiz Sonuçları", expanded=True):
+            st.warning("⚠️ Eğer tüm değerler 0 ise, lütfen terminal/konsol çıktısını kontrol edin!")
+            st.info("Terminal'de `Sentos API Response Yapısı` ve `İlk sipariş örneği` loglarını arayın.")
+            
             st.subheader("Pazar Yeri Verileri")
             st.json(by_marketplace)
             
             st.subheader("İlk 3 Ürün")
-            st.json(dict(list(by_product.items())[:3]))
+            st.json(dict(list(by_product.items())[:3]) if by_product else {})
             
             st.subheader("Özet")
+            st.json(summary)
+            
+            # Terminal log talimatları
+            st.divider()
+            st.markdown("""
+            ### 📋 Terminal Loglarını Nasıl Bulursunuz?
+            
+            1. Streamlit'in çalıştığı terminal/konsol penceresine gidin
+            2. Şu satırları arayın:
+               - `Sentos API Response Yapısı:`
+               - `İlk sipariş keys:`
+               - `İlk sipariş örneği:`
+            3. Bu bilgileri kopyalayıp paylaşın
+            
+            **Örnek log çıktısı:**
+            ```
+            INFO - Sentos API Response Yapısı: ['data', 'total', 'page']
+            INFO - İlk sipariş keys: ['id', 'orderNumber', 'marketplace', 'items', ...]
+            INFO - İlk sipariş örneği: {'id': 123, 'marketplace': 'trendyol', ...}
+            ```
+            """)
             st.json(summary)
     
     # --- ÖZET KARTLARı ---

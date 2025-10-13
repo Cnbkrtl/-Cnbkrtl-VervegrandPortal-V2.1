@@ -47,6 +47,40 @@ class SalesAnalytics:
             progress_callback=progress_callback
         )
         
+        logging.info(f"Toplam {len(all_orders)} sipariş çekildi")
+        print(f"\n{'='*60}")
+        print(f"🔍 DEBUG: Toplam {len(all_orders)} sipariş çekildi")
+        print(f"{'='*60}")
+        
+        if all_orders:
+            first_order = all_orders[0]
+            print(f"\n📦 İLK SİPARİŞ YAPISI:")
+            print(f"   Keys: {list(first_order.keys())}")
+            print(f"   ID: {first_order.get('id')}")
+            print(f"   Order Number: {first_order.get('order_id', first_order.get('order_code'))}")
+            print(f"   Marketplace: {first_order.get('source', first_order.get('shop'))}")
+            
+            # Items kontrolü - Sentos'ta 'lines' field'ı kullanılıyor
+            items = first_order.get('lines', first_order.get('items', first_order.get('orderItems', first_order.get('products', []))))
+            print(f"\n📋 LINES/ITEMS KONTROLÜ:")
+            print(f"   Lines field var mı? {'lines' in first_order}")
+            print(f"   Lines değeri var mı? {items is not None}")
+            print(f"   Lines uzunluk: {len(items) if items else 0}")
+            
+            if items:
+                print(f"   ✅ LINES DOLU!")
+                print(f"   İlk line keys: {list(items[0].keys())}")
+                print(f"   İlk line örneği: {items[0]}")
+            else:
+                print(f"   ⚠️ LINES BOŞ!")
+                print(f"   Sipariş tam yapısı: {first_order}")
+            
+            print(f"{'='*60}\n")
+            logging.info(f"İlk sipariş örneği: {all_orders[0]}")
+        else:
+            print(f"\n❌ HİÇ SİPARİŞ ÇEKİLEMEDİ!")
+            print(f"{'='*60}\n")
+        
         if progress_callback:
             progress_callback({
                 'message': '📈 Veriler analiz ediliyor...',
@@ -136,6 +170,9 @@ class SalesAnalytics:
             'top_returned_products': []
         }
         
+        # Status kodlarını topla (debug için)
+        status_codes = set()
+        
         # Siparişleri işle
         total = len(orders)
         for idx, order in enumerate(orders):
@@ -150,8 +187,16 @@ class SalesAnalytics:
                 summary, 
                 by_marketplace, 
                 by_date, 
-                by_product
+                by_product,
+                status_codes  # Status kodlarını topla
             )
+        
+        # Status kodlarını göster
+        print(f"\n{'='*60}")
+        print(f"📊 TÜM STATUS KODLARI:")
+        print(f"   Bulunan status kodları: {sorted(status_codes)}")
+        print(f"   Toplam farklı status: {len(status_codes)}")
+        print(f"{'='*60}\n")
         
         # İade oranını hesapla
         if summary['gross_quantity'] > 0:
@@ -222,39 +267,68 @@ class SalesAnalytics:
             'profitability': profitability
         }
     
-    def _process_order(self, order, summary, by_marketplace, by_date, by_product):
+    def _process_order(self, order, summary, by_marketplace, by_date, by_product, status_codes):
         """Tek bir siparişi işler ve istatistiklere ekler"""
         
         # Debug: İlk siparişin yapısını logla
         if summary['total_orders'] == 0:
             logging.info(f"Örnek sipariş yapısı: {order}")
+            items_check = order.get('items', order.get('orderItems', order.get('products', [])))
+            logging.info(f"Items field: {items_check}")
+            logging.info(f"Items sayısı: {len(items_check) if items_check else 0}")
         
         # Temel bilgiler - Sentos API field isimleri
         order_status = order.get('status', order.get('orderStatus', 'UNKNOWN'))
+        # Status string'e çevir (eğer int ise)
+        order_status_str = str(order_status) if order_status else 'UNKNOWN'
+        
+        # Status kodunu kaydet (debug için)
+        status_codes.add(order_status)
+        
+        # Debug: İlk 5 siparişin status değerlerini topla
+        if summary['total_orders'] < 5:
+            print(f"Sipariş #{summary['total_orders'] + 1} - Status: {order_status}, Source: {order.get('source')}, Date: {order.get('order_date')}")
         
         # Marketplace için farklı olası field isimlerini kontrol et
+        # Sentos'ta 'source' field'ı kullanılıyor!
         marketplace = (
+            order.get('source') or          # Sentos gerçek field
+            order.get('shop') or            # Alternatif
             order.get('marketplace') or 
             order.get('marketPlace') or 
             order.get('channel') or 
             order.get('salesChannel') or
             'UNKNOWN'
         )
+        # Marketplace string'e çevir
+        marketplace = str(marketplace) if marketplace else 'UNKNOWN'
         
         # Tarih için farklı olası field isimlerini kontrol et
+        # Sentos'ta 'order_date' field'ı kullanılıyor!
         order_date = (
+            order.get('order_date') or      # Sentos gerçek field
+            order.get('created_at') or      # Alternatif
             order.get('createdDate') or 
             order.get('orderDate') or 
             order.get('date') or
             ''
         )
+        # Tarih string'e çevir ve formatla
+        order_date = str(order_date) if order_date else ''
         if order_date and len(order_date) >= 10:
             order_date = order_date[:10]  # YYYY-MM-DD formatına çevir
         else:
             order_date = 'UNKNOWN'
         
         # İade mi kontrol et
-        is_return = order_status.upper() in ['RETURNED', 'CANCELLED', 'REFUNDED', 'IPTAL', 'IADE']
+        # NOT: Sentos'ta iadelerin AYRI bir status kodu YOK!
+        # İadeler aynı sipariş içinde NEGATIF quantity ile geliyor
+        # Status kodları: 1 = Aktif sipariş (içinde hem pozitif hem negatif itemlar olabilir)
+        # Bu yüzden her ITEM'ı ayrı ayrı kontrol etmeliyiz!
+        is_return_order = (
+            order_status_str.upper() in ['RETURNED', 'CANCELLED', 'REFUNDED', 'IPTAL', 'IADE', 'CANCEL'] or
+            order_status in [2, 3, 4, 5, 6, 7, 8, 9]  # Bilinmeyen iade status kodları (varsa)
+        )
         
         # Sipariş sayısı
         summary['total_orders'] += 1
@@ -262,7 +336,9 @@ class SalesAnalytics:
         by_date[order_date]['order_count'] += 1
         
         # Sipariş kalemleri - Farklı olası field isimlerini kontrol et
+        # Sentos'ta 'lines' field'ı kullanılıyor!
         items = (
+            order.get('lines') or           # Sentos gerçek field
             order.get('items') or 
             order.get('orderItems') or 
             order.get('products') or 
@@ -270,50 +346,88 @@ class SalesAnalytics:
         )
         
         for item in items:
-            # Miktar
-            quantity = (
-                item.get('quantity') or 
-                item.get('qty') or 
-                item.get('amount') or 
-                0
-            )
-            
-            # Birim fiyat
-            unit_price = float(
-                item.get('unitPrice') or 
-                item.get('price') or 
-                item.get('salePrice') or 
-                0
-            )
-            
-            # Toplam fiyat
-            item_total = float(
-                item.get('totalPrice') or 
-                item.get('total') or 
-                (quantity * unit_price)
-            )
-            
-            # Maliyet bilgisi (eğer varsa)
-            unit_cost = float(
-                item.get('unitCost') or 
-                item.get('cost') or 
-                item.get('buyPrice') or 
-                0
-            )
-            total_cost = unit_cost * quantity
+            try:
+                # Miktar - güvenli dönüşüm
+                quantity_raw = (
+                    item.get('quantity') or     # Sentos gerçek field
+                    item.get('qty') or 
+                    item.get('amount') or 
+                    0
+                )
+                quantity = int(float(quantity_raw)) if quantity_raw else 0
+                
+                # ÖNEMLİ: Negatif quantity iade anlamına gelir!
+                # Sentos'ta iade siparişleri ayrı status ile gelmiyor,
+                # aynı sipariş içinde negatif quantity olarak geliyor
+                is_return_item = (quantity < 0) or is_return_order
+                
+                # Quantity'yi mutlak değere çevir (hesaplamalar için)
+                quantity_abs = abs(quantity)
+                
+                # Debug: Negatif quantity'leri logla
+                if quantity < 0:
+                    print(f"⚠️ NEGATIF QUANTITY BULUNDU!")
+                    print(f"   Sipariş: {order.get('order_code', 'N/A')}")
+                    print(f"   Ürün: {item.get('name', 'N/A')}")
+                    print(f"   Quantity: {quantity}")
+                    print(f"   Amount: {item.get('amount', 'N/A')}")
+                    print(f"   Status: {order_status}")
+                    print(f"---")
+                
+                # Birim fiyat - güvenli dönüşüm
+                unit_price_raw = (
+                    item.get('price') or        # Sentos gerçek field
+                    item.get('unitPrice') or 
+                    item.get('salePrice') or 
+                    0
+                )
+                unit_price = float(unit_price_raw) if unit_price_raw else 0.0
+                
+                # Toplam fiyat - güvenli dönüşüm
+                total_price_raw = (
+                    item.get('amount') or       # Sentos gerçek field (total amount)
+                    item.get('totalPrice') or 
+                    item.get('total') or 
+                    None
+                )
+                if total_price_raw is not None:
+                    item_total = float(total_price_raw)
+                else:
+                    item_total = quantity * unit_price
+                
+                # Maliyet bilgisi (eğer varsa) - güvenli dönüşüm
+                # Sentos'ta maliyet bilgisi yok gibi görünüyor, 0 olarak bırak
+                unit_cost_raw = (
+                    item.get('cost') or
+                    item.get('unitCost') or 
+                    item.get('buyPrice') or 
+                    0
+                )
+                unit_cost = float(unit_cost_raw) if unit_cost_raw else 0.0
+                total_cost = unit_cost * quantity
+                
+            except (ValueError, TypeError) as e:
+                logging.warning(f"Item verisi işlenirken hata: {e}, Item: {item}")
+                # Hata durumunda sıfır değerler kullan
+                quantity = 0
+                unit_price = 0.0
+                item_total = 0.0
+                unit_cost = 0.0
+                total_cost = 0.0
             
             # Ürün bilgileri
             product_name = (
+                item.get('name') or             # Sentos gerçek field
+                item.get('invoice_name') or     # Alternatif
                 item.get('productName') or 
-                item.get('name') or 
                 item.get('title') or 
                 'Bilinmeyen Ürün'
             )
             
             sku = (
-                item.get('sku') or 
+                item.get('sku') or              # Sentos gerçek field
+                item.get('barcode') or          # Alternatif
                 item.get('productCode') or 
-                item.get('barcode') or 
                 ''
             )
             
@@ -324,33 +438,33 @@ class SalesAnalytics:
                 by_product[product_key]['sku'] = sku
                 by_product[product_key]['unit_cost'] = unit_cost
             
-            if is_return:
-                # İade
-                summary['return_quantity'] += quantity
-                summary['return_amount'] += item_total
+            if is_return_item:
+                # İade - mutlak değer kullan
+                summary['return_quantity'] += quantity_abs
+                summary['return_amount'] += abs(item_total)
                 
-                by_marketplace[marketplace]['return_quantity'] += quantity
-                by_marketplace[marketplace]['return_amount'] += item_total
+                by_marketplace[marketplace]['return_quantity'] += quantity_abs
+                by_marketplace[marketplace]['return_amount'] += abs(item_total)
                 
-                by_date[order_date]['return_quantity'] += quantity
-                by_date[order_date]['return_amount'] += item_total
+                by_date[order_date]['return_quantity'] += quantity_abs
+                by_date[order_date]['return_amount'] += abs(item_total)
                 
-                by_product[product_key]['quantity_returned'] += quantity
-                by_product[product_key]['return_amount'] += item_total
+                by_product[product_key]['quantity_returned'] += quantity_abs
+                by_product[product_key]['return_amount'] += abs(item_total)
             else:
                 # Normal satış
-                summary['gross_quantity'] += quantity
+                summary['gross_quantity'] += quantity_abs
                 summary['gross_revenue'] += item_total
                 summary['total_cost'] += total_cost
                 
-                by_marketplace[marketplace]['gross_quantity'] += quantity
+                by_marketplace[marketplace]['gross_quantity'] += quantity_abs
                 by_marketplace[marketplace]['gross_revenue'] += item_total
                 by_marketplace[marketplace]['total_cost'] += total_cost
                 
-                by_date[order_date]['gross_quantity'] += quantity
+                by_date[order_date]['gross_quantity'] += quantity_abs
                 by_date[order_date]['gross_revenue'] += item_total
                 
-                by_product[product_key]['quantity_sold'] += quantity
+                by_product[product_key]['quantity_sold'] += quantity_abs
                 by_product[product_key]['gross_revenue'] += item_total
                 by_product[product_key]['total_cost'] += total_cost
     

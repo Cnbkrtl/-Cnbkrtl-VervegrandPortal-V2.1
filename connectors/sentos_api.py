@@ -278,6 +278,24 @@ class SentosAPI:
         
         return stats
     
+    def get_order_detail(self, order_id):
+        """
+        Tek bir siparişin detayını çeker (items dahil)
+        
+        Args:
+            order_id: Sipariş ID'si
+            
+        Returns:
+            dict: Detaylı sipariş bilgisi
+        """
+        try:
+            endpoint = f"/orders/{order_id}"
+            response = self._make_request("GET", endpoint)
+            return response.json()
+        except Exception as e:
+            logging.error(f"Sipariş detayı çekilirken hata (ID: {order_id}): {e}")
+            return None
+    
     def get_sales_orders(self, start_date=None, end_date=None, marketplace=None, status=None, 
                         page=1, page_size=100, progress_callback=None):
         """
@@ -310,12 +328,16 @@ class SentosAPI:
         # Tarih filtreleri
         if start_date:
             params['startDate'] = start_date
+            params['start_date'] = start_date  # Alternatif
+            print(f"🗓️ Tarih filtresi: {start_date} - {end_date}")
         if end_date:
             params['endDate'] = end_date
+            params['end_date'] = end_date  # Alternatif
             
         # Pazar yeri filtresi
         if marketplace:
             params['marketplace'] = marketplace.upper()
+            print(f"🏪 Pazar yeri filtresi: {marketplace}")
             
         # Durum filtresi
         if status:
@@ -323,11 +345,71 @@ class SentosAPI:
         
         try:
             endpoint = "/orders"
-            response = self._make_request("GET", endpoint, params=params).json()
             
-            orders = response.get('data', [])
-            total_elements = response.get('total_elements', 0)
-            total_pages = response.get('total_pages', 1)
+            # Debug: API parametrelerini göster
+            print(f"\n{'='*60}")
+            print(f"🌐 SENTOS API İSTEĞİ")
+            print(f"{'='*60}")
+            print(f"Endpoint: {endpoint}")
+            print(f"Parametreler: {params}")
+            print(f"{'='*60}\n")
+            
+            response = self._make_request("GET", endpoint, params=params)
+            response_data = response.json()
+            
+            # Debug: İlk çağrıda response yapısını logla
+            if page == 1:
+                print(f"\n{'='*60}")
+                print(f"🌐 SENTOS API RESPONSE DEBUG")
+                print(f"{'='*60}")
+                print(f"Response type: {type(response_data)}")
+                
+                if isinstance(response_data, dict):
+                    print(f"Response keys: {list(response_data.keys())}")
+                    if 'data' in response_data:
+                        print(f"Data type: {type(response_data['data'])}")
+                        print(f"Data length: {len(response_data['data']) if response_data['data'] else 0}")
+                        if response_data['data']:
+                            print(f"First order keys: {list(response_data['data'][0].keys())}")
+                            print(f"First order sample: {response_data['data'][0]}")
+                elif isinstance(response_data, list):
+                    print(f"Response is list, length: {len(response_data)}")
+                    if response_data:
+                        print(f"First order keys: {list(response_data[0].keys())}")
+                        print(f"First order sample: {response_data[0]}")
+                
+                print(f"{'='*60}\n")
+                
+                logging.info(f"Sentos API Response Yapısı: {list(response_data.keys()) if isinstance(response_data, dict) else 'LIST'}")
+                if isinstance(response_data, dict) and response_data:
+                    first_key = list(response_data.keys())[0]
+                    logging.info(f"İlk key: {first_key}, değer tipi: {type(response_data[first_key])}")
+                    if isinstance(response_data.get('data'), list) and response_data['data']:
+                        logging.info(f"İlk sipariş keys: {list(response_data['data'][0].keys())}")
+                elif isinstance(response_data, list) and response_data:
+                    logging.info(f"Response liste. İlk eleman keys: {list(response_data[0].keys())}")
+            
+            # Response yapısına göre veriyi çıkar
+            if isinstance(response_data, dict):
+                # Response bir dict ise (pagination bilgisi var)
+                orders = response_data.get('data', response_data.get('orders', response_data.get('content', [])))
+                total_elements = response_data.get('total', response_data.get('totalElements', response_data.get('total_elements', len(orders))))
+                total_pages = response_data.get('totalPages', response_data.get('total_pages', 1))
+                
+                print(f"📊 RESPONSE SUMMARY:")
+                print(f"   Total Elements (Toplam Kayıt): {total_elements}")
+                print(f"   Total Pages (Toplam Sayfa): {total_pages}")
+                print(f"   Orders in this page (Bu sayfadaki sipariş): {len(orders)}")
+                print(f"{'='*60}\n")
+            elif isinstance(response_data, list):
+                # Response direkt liste ise (pagination yok)
+                orders = response_data
+                total_elements = len(orders)
+                total_pages = 1
+            else:
+                orders = []
+                total_elements = 0
+                total_pages = 1
             
             if progress_callback:
                 progress_callback({
@@ -382,6 +464,52 @@ class SentosAPI:
                 orders = result.get('orders', [])
                 if not orders:
                     break
+                
+                # İlk siparişi kontrol et - items var mı?
+                if page == 1 and orders:
+                    first_order = orders[0]
+                    # Sentos'ta 'lines' field'ı kullanılıyor
+                    items = first_order.get('lines', first_order.get('items', first_order.get('orderItems', first_order.get('products', []))))
+                    
+                    print(f"\n{'='*60}")
+                    print(f"🔍 ITEMS KONTROLÜ (İlk Sipariş)")
+                    print(f"{'='*60}")
+                    print(f"Lines field var mı? {'lines' in first_order}")
+                    print(f"Items field var mı? {'items' in first_order}")
+                    print(f"Lines değeri: {items}")
+                    print(f"Lines uzunluk: {len(items) if items else 0}")
+                    print(f"{'='*60}\n")
+                    
+                    if not items:
+                        # Items boş - detay çekmemiz gerekiyor
+                        logging.warning("⚠️ Siparişlerde 'items' field'ı boş! Detay endpoint kullanılacak.")
+                        logging.info("Bu işlem daha uzun sürecek...")
+                        
+                        # İlk 5 siparişin detayını çek (test için)
+                        detailed_orders = []
+                        for order in orders[:5]:
+                            order_id = order.get('id')
+                            if order_id:
+                                detail = self.get_order_detail(order_id)
+                                if detail:
+                                    detailed_orders.append(detail)
+                                time.sleep(0.2)  # Rate limiting
+                        
+                        if detailed_orders:
+                            logging.info(f"Detaylı sipariş örneği: {detailed_orders[0]}")
+                            # Eğer detaylı versiyonda items varsa, tüm siparişler için detay çekelim
+                            detail_items = detailed_orders[0].get('items', detailed_orders[0].get('orderItems', []))
+                            if detail_items:
+                                logging.info("✅ Detay endpoint'inde items var! Tüm siparişler için detay çekilecek.")
+                                # Tüm siparişleri detaylı olarak yeniden çek
+                                orders = []
+                                for order in result.get('orders', []):
+                                    order_id = order.get('id')
+                                    if order_id:
+                                        detail = self.get_order_detail(order_id)
+                                        if detail:
+                                            orders.append(detail)
+                                        time.sleep(0.2)
                 
                 all_orders.extend(orders)
                 
