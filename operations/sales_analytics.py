@@ -173,6 +173,8 @@ class SalesAnalytics:
         # Status kodlarını topla (debug için)
         status_codes = set()
         status_counts = defaultdict(int)  # Her status'tan kaç tane var
+        item_statuses = set()  # Tüm item status'ları topla
+        shopify_item_statuses = set()  # 🔍 SHOPIFY'A ÖZEL item status'ları
         
         # Siparişleri işle
         total = len(orders)
@@ -190,7 +192,9 @@ class SalesAnalytics:
                 by_date, 
                 by_product,
                 status_codes,  # Status kodlarını topla
-                status_counts  # Status sayılarını topla
+                status_counts,  # Status sayılarını topla
+                item_statuses,  # Item status'ları topla
+                shopify_item_statuses  # 🔍 Shopify item status'ları topla
             )
         
         # Status kodlarını göster
@@ -203,6 +207,14 @@ class SalesAnalytics:
             count = status_counts[status]
             percentage = (count / len(orders)) * 100
             print(f"   Status {status}: {count:4d} sipariş ({percentage:5.1f}%)")
+        print(f"\n🏷️ ITEM STATUS KODLARI:")
+        print(f"   Bulunan item status'ları: {sorted(item_statuses)}")
+        print(f"   Toplam farklı item status: {len(item_statuses)}")
+        print(f"\n🛍️ SHOPIFY ITEM STATUS KODLARI:")
+        print(f"   Shopify'a özel item status'ları: {sorted(shopify_item_statuses)}")
+        print(f"   Shopify'da toplam farklı item status: {len(shopify_item_statuses)}")
+        if not shopify_item_statuses:
+            print(f"   ⚠️ UYARI: Shopify siparişlerinde HIÇBIR item status bulunamadı!")
         print(f"{'='*60}\n")
         
         # İade oranını hesapla
@@ -248,6 +260,21 @@ class SalesAnalytics:
             date_data['net_quantity'] = date_data['gross_quantity'] - date_data['return_quantity']
             date_data['net_revenue'] = date_data['gross_revenue'] - date_data['return_amount']
         
+        # ✅ NET HESAPLAMALAR TAMAMLANDI - ŞİMDİ YAZDIRALIM
+        print(f"\n{'='*60}")
+        print(f"💰 MARKETPLACE CİRO DETAYLARI (NET HESAPLAMALAR SONRASI):")
+        print(f"{'='*60}")
+        for mp, data in by_marketplace.items():
+            print(f"\n🏪 {mp}:")
+            print(f"   Sipariş Sayısı: {data['order_count']}")
+            print(f"   Brüt Adet: {data['gross_quantity']}")
+            print(f"   İade Adet: {data['return_quantity']}")
+            print(f"   Net Adet: {data['net_quantity']}")  # ← ŞİMDİ DOĞRU DEĞER!
+            print(f"   Brüt Ciro: ₺{data['gross_revenue']:,.2f}")
+            print(f"   İade Tutarı: ₺{data['return_amount']:,.2f}")
+            print(f"   Net Ciro: ₺{data['net_revenue']:,.2f}")  # ← ŞİMDİ DOĞRU DEĞER!
+        print(f"\n{'='*60}\n")
+        
         # Ürün bazında karlılık hesapla
         for product_data in by_product.values():
             product_data['net_quantity'] = product_data['quantity_sold'] - product_data['quantity_returned']
@@ -274,7 +301,7 @@ class SalesAnalytics:
             'profitability': profitability
         }
     
-    def _process_order(self, order, summary, by_marketplace, by_date, by_product, status_codes, status_counts):
+    def _process_order(self, order, summary, by_marketplace, by_date, by_product, status_codes, status_counts, item_statuses, shopify_item_statuses):
         """Tek bir siparişi işler ve istatistiklere ekler"""
         
         # Debug: İlk siparişin yapısını logla
@@ -292,35 +319,6 @@ class SalesAnalytics:
         # Status kodunu kaydet (debug için)
         status_codes.add(order_status)
         status_counts[order_status] += 1
-        
-        # Debug: Status 2 ve 6'dan örnekler göster
-        if order_status == 2 and status_counts[order_status] <= 3:
-            print(f"\n🔍 STATUS 2 ÖRNEK #{status_counts[2]}:")
-            print(f"   Order Code: {order.get('order_code')}")
-            print(f"   Source: {order.get('source')}")
-            print(f"   Date: {order.get('order_date')}")
-            print(f"   Total: {order.get('total')}")
-            if order.get('lines'):
-                first_line = order['lines'][0]
-                print(f"   First Item: {first_line.get('name', 'N/A')[:50]}")
-                print(f"   Quantity: {first_line.get('quantity')}")
-                print(f"   Amount: {first_line.get('amount')}")
-        
-        if order_status == 6 and status_counts[order_status] <= 3:
-            print(f"\n❌ STATUS 6 ÖRNEK #{status_counts[6]}:")
-            print(f"   Order Code: {order.get('order_code')}")
-            print(f"   Source: {order.get('source')}")
-            print(f"   Date: {order.get('order_date')}")
-            print(f"   Total: {order.get('total')}")
-            if order.get('lines'):
-                first_line = order['lines'][0]
-                print(f"   First Item: {first_line.get('name', 'N/A')[:50]}")
-                print(f"   Quantity: {first_line.get('quantity')}")
-                print(f"   Amount: {first_line.get('amount')}")
-        
-        # Debug: İlk 5 siparişin status değerlerini topla
-        if summary['total_orders'] < 5:
-            print(f"Sipariş #{summary['total_orders'] + 1} - Status: {order_status}, Source: {order.get('source')}, Date: {order.get('order_date')}")
         
         # Marketplace için farklı olası field isimlerini kontrol et
         # Sentos'ta 'source' field'ı kullanılıyor!
@@ -354,14 +352,21 @@ class SalesAnalytics:
             order_date = 'UNKNOWN'
         
         # İade mi kontrol et
-        # NOT: Sentos'ta iadelerin AYRI bir status kodu YOK!
-        # İadeler aynı sipariş içinde NEGATIF quantity ile geliyor
-        # Status kodları: 1 = Aktif sipariş (içinde hem pozitif hem negatif itemlar olabilir)
-        # Bu yüzden her ITEM'ı ayrı ayrı kontrol etmeliyiz!
-        is_return_order = (
-            order_status_str.upper() in ['RETURNED', 'CANCELLED', 'REFUNDED', 'IPTAL', 'IADE', 'CANCEL'] or
-            order_status in [2, 3, 4, 5, 6, 7, 8, 9]  # Bilinmeyen iade status kodları (varsa)
-        )
+        # NOT: Sentos API dökümantasyonuna göre:
+        # Status 1 = Onay Bekliyor
+        # Status 2 = ONAYLANDI (İade DEĞİL!)
+        # Status 3 = Tedarik Sürecinde
+        # Status 4 = Hazırlanıyor
+        # Status 5 = Kargoya Verildi
+        # Status 6 = İptal/İade Edildi ← SENTOS RAPORUNDA "İPTAL/İADE" OLARAK GÖSTERİLİYOR
+        # Status 99 = Teslim Edildi
+        # 
+        # İADELER/İPTALLER:
+        # - Status 6 = Tüm sipariş iptal/iade
+        # - Item status "rejected" = Kısmi iade (bazı ürünler)
+        
+        # Status 6 siparişleri İADE olarak işle
+        is_cancelled_order = (order_status == 6)
         
         # Sipariş sayısı
         summary['total_orders'] += 1
@@ -379,6 +384,15 @@ class SalesAnalytics:
         )
         
         for item in items:
+            # Item status'u kaydet
+            item_status = item.get('status', 'UNKNOWN')
+            if item_status:
+                item_statuses.add(str(item_status))
+                
+                # 🔍 SHOPIFY SİPARİŞİYSE ÖZEL OLARAK KAYDET
+                if 'shopify' in marketplace.lower():
+                    shopify_item_statuses.add(str(item_status))
+            
             try:
                 # Miktar - güvenli dönüşüm
                 quantity_raw = (
@@ -389,23 +403,11 @@ class SalesAnalytics:
                 )
                 quantity = int(float(quantity_raw)) if quantity_raw else 0
                 
-                # ÖNEMLİ: Negatif quantity iade anlamına gelir!
-                # Sentos'ta iade siparişleri ayrı status ile gelmiyor,
-                # aynı sipariş içinde negatif quantity olarak geliyor
-                is_return_item = (quantity < 0) or is_return_order
-                
-                # Quantity'yi mutlak değere çevir (hesaplamalar için)
-                quantity_abs = abs(quantity)
-                
-                # Debug: Negatif quantity'leri logla
-                if quantity < 0:
-                    print(f"⚠️ NEGATIF QUANTITY BULUNDU!")
-                    print(f"   Sipariş: {order.get('order_code', 'N/A')}")
-                    print(f"   Ürün: {item.get('name', 'N/A')}")
-                    print(f"   Quantity: {quantity}")
-                    print(f"   Amount: {item.get('amount', 'N/A')}")
-                    print(f"   Status: {order_status}")
-                    print(f"---")
+                # İade kontrolü:
+                # 1. Status 6 = Tüm sipariş iptal/iade (ciroya dahil değil)
+                # 2. Item status "rejected" = Kısmi iade (bu ürün iade edilmiş)
+                item_status_str = str(item_status).lower() if item_status else ''
+                is_return_item = is_cancelled_order or (item_status_str == 'rejected')
                 
                 # Birim fiyat - güvenli dönüşüm
                 unit_price_raw = (
@@ -471,35 +473,35 @@ class SalesAnalytics:
                 by_product[product_key]['sku'] = sku
                 by_product[product_key]['unit_cost'] = unit_cost
             
+            # HER ZAMAN BRÜT'E EKLE (iade/iptal dahil tüm siparişler)
+            summary['gross_quantity'] += quantity
+            summary['gross_revenue'] += item_total
+            summary['total_cost'] += total_cost
+            
+            by_marketplace[marketplace]['gross_quantity'] += quantity
+            by_marketplace[marketplace]['gross_revenue'] += item_total
+            by_marketplace[marketplace]['total_cost'] += total_cost
+            
+            by_date[order_date]['gross_quantity'] += quantity
+            by_date[order_date]['gross_revenue'] += item_total
+            
+            by_product[product_key]['quantity_sold'] += quantity
+            by_product[product_key]['gross_revenue'] += item_total
+            by_product[product_key]['total_cost'] += total_cost
+            
+            # EĞER İADE/İPTAL İSE, İADE'YE DE EKLE
             if is_return_item:
-                # İade - mutlak değer kullan
-                summary['return_quantity'] += quantity_abs
-                summary['return_amount'] += abs(item_total)
+                summary['return_quantity'] += quantity
+                summary['return_amount'] += item_total
                 
-                by_marketplace[marketplace]['return_quantity'] += quantity_abs
-                by_marketplace[marketplace]['return_amount'] += abs(item_total)
+                by_marketplace[marketplace]['return_quantity'] += quantity
+                by_marketplace[marketplace]['return_amount'] += item_total
                 
-                by_date[order_date]['return_quantity'] += quantity_abs
-                by_date[order_date]['return_amount'] += abs(item_total)
+                by_date[order_date]['return_quantity'] += quantity
+                by_date[order_date]['return_amount'] += item_total
                 
-                by_product[product_key]['quantity_returned'] += quantity_abs
-                by_product[product_key]['return_amount'] += abs(item_total)
-            else:
-                # Normal satış
-                summary['gross_quantity'] += quantity_abs
-                summary['gross_revenue'] += item_total
-                summary['total_cost'] += total_cost
-                
-                by_marketplace[marketplace]['gross_quantity'] += quantity_abs
-                by_marketplace[marketplace]['gross_revenue'] += item_total
-                by_marketplace[marketplace]['total_cost'] += total_cost
-                
-                by_date[order_date]['gross_quantity'] += quantity_abs
-                by_date[order_date]['gross_revenue'] += item_total
-                
-                by_product[product_key]['quantity_sold'] += quantity_abs
-                by_product[product_key]['gross_revenue'] += item_total
-                by_product[product_key]['total_cost'] += total_cost
+                by_product[product_key]['quantity_returned'] += quantity
+                by_product[product_key]['return_amount'] += item_total
     
     def _get_top_profitable_products(self, by_product, top_n=20):
         """En karlı ürünleri döndürür"""
