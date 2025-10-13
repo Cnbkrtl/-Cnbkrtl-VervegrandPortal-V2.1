@@ -32,13 +32,14 @@ if 'authentication_status' not in st.session_state or not st.session_state['auth
 # --- API Bilgilerini Yükle ---
 try:
     user_keys = load_all_user_keys(st.session_state.get('username', 'admin'))
-    sentos_url = user_keys.get('sentos_url')
-    sentos_key = user_keys.get('sentos_key')
-    sentos_secret = user_keys.get('sentos_secret')
+    sentos_url = user_keys.get('sentos_api_url')
+    sentos_key = user_keys.get('sentos_api_key')
+    sentos_secret = user_keys.get('sentos_api_secret')
     sentos_cookie = user_keys.get('sentos_cookie')
     
     if not all([sentos_url, sentos_key, sentos_secret]):
         st.error("❌ Sentos API bilgileri eksik. Lütfen ayarlar sayfasından yapılandırın.")
+        st.error(f"Debug: URL={sentos_url is not None}, Key={sentos_key is not None}, Secret={sentos_secret is not None}")
         st.stop()
     
     sentos_api = SentosAPI(sentos_url, sentos_key, sentos_secret, sentos_cookie)
