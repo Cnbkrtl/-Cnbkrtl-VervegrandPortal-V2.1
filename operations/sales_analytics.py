@@ -172,6 +172,7 @@ class SalesAnalytics:
         
         # Status kodlarını topla (debug için)
         status_codes = set()
+        status_counts = defaultdict(int)  # Her status'tan kaç tane var
         
         # Siparişleri işle
         total = len(orders)
@@ -188,7 +189,8 @@ class SalesAnalytics:
                 by_marketplace, 
                 by_date, 
                 by_product,
-                status_codes  # Status kodlarını topla
+                status_codes,  # Status kodlarını topla
+                status_counts  # Status sayılarını topla
             )
         
         # Status kodlarını göster
@@ -196,6 +198,11 @@ class SalesAnalytics:
         print(f"📊 TÜM STATUS KODLARI:")
         print(f"   Bulunan status kodları: {sorted(status_codes)}")
         print(f"   Toplam farklı status: {len(status_codes)}")
+        print(f"\n📈 STATUS DAĞILIMI:")
+        for status in sorted(status_counts.keys()):
+            count = status_counts[status]
+            percentage = (count / len(orders)) * 100
+            print(f"   Status {status}: {count:4d} sipariş ({percentage:5.1f}%)")
         print(f"{'='*60}\n")
         
         # İade oranını hesapla
@@ -267,7 +274,7 @@ class SalesAnalytics:
             'profitability': profitability
         }
     
-    def _process_order(self, order, summary, by_marketplace, by_date, by_product, status_codes):
+    def _process_order(self, order, summary, by_marketplace, by_date, by_product, status_codes, status_counts):
         """Tek bir siparişi işler ve istatistiklere ekler"""
         
         # Debug: İlk siparişin yapısını logla
@@ -284,6 +291,32 @@ class SalesAnalytics:
         
         # Status kodunu kaydet (debug için)
         status_codes.add(order_status)
+        status_counts[order_status] += 1
+        
+        # Debug: Status 2 ve 6'dan örnekler göster
+        if order_status == 2 and status_counts[order_status] <= 3:
+            print(f"\n🔍 STATUS 2 ÖRNEK #{status_counts[2]}:")
+            print(f"   Order Code: {order.get('order_code')}")
+            print(f"   Source: {order.get('source')}")
+            print(f"   Date: {order.get('order_date')}")
+            print(f"   Total: {order.get('total')}")
+            if order.get('lines'):
+                first_line = order['lines'][0]
+                print(f"   First Item: {first_line.get('name', 'N/A')[:50]}")
+                print(f"   Quantity: {first_line.get('quantity')}")
+                print(f"   Amount: {first_line.get('amount')}")
+        
+        if order_status == 6 and status_counts[order_status] <= 3:
+            print(f"\n❌ STATUS 6 ÖRNEK #{status_counts[6]}:")
+            print(f"   Order Code: {order.get('order_code')}")
+            print(f"   Source: {order.get('source')}")
+            print(f"   Date: {order.get('order_date')}")
+            print(f"   Total: {order.get('total')}")
+            if order.get('lines'):
+                first_line = order['lines'][0]
+                print(f"   First Item: {first_line.get('name', 'N/A')[:50]}")
+                print(f"   Quantity: {first_line.get('quantity')}")
+                print(f"   Amount: {first_line.get('amount')}")
         
         # Debug: İlk 5 siparişin status değerlerini topla
         if summary['total_orders'] < 5:
