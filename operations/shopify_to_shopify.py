@@ -331,23 +331,52 @@ def transfer_order(source_api, destination_api, order_data):
             "taxesIncluded": True  # ÖNEMLİ: Fiyatlar vergi dahil
         }
         
-        # ✅ TRANSACTION EKLE - Toplam tutarı belirlemek için
+        # ✅ TRANSACTION EKLE - Sadece toplam tutar > 0 ise
         # shippingLine olmadan Shopify toplam tutarı doğru hesaplamıyor
         # Transaction ile manuel olarak toplam tutarı belirtiyoruz
         currency = order_data.get('currencyCode', 'TRY')
-        transaction = {
-            "gateway": payment_method if payment_method != "Bilinmiyor" else "manual",
-            "kind": "SALE",
-            "status": "SUCCESS" if financial_status == "Paid" else "PENDING",
-            "amountSet": {
-                "shopMoney": {
-                    "amount": total_amount,  # Kargo + vergi + ürünler dahil toplam
-                    "currencyCode": currency
+        
+        # total_amount'u float'a çevir ve kontrol et
+        try:
+            # String olarak gelebilir, güvenli çevrim yap
+            total_amount_clean = str(total_amount).strip().replace(',', '.')
+            total_amount_float = float(total_amount_clean)
+            
+            # Debug log
+            log_messages.append(f"  🔍 Debug - Total Amount:")
+            log_messages.append(f"     ├─ Ham Değer: {repr(total_amount)}")
+            log_messages.append(f"     ├─ Tip: {type(total_amount)}")
+            log_messages.append(f"     ├─ Temizlenmiş: {total_amount_clean}")
+            log_messages.append(f"     └─ Float: {total_amount_float}")
+            
+        except (ValueError, TypeError) as e:
+            total_amount_float = 0.0
+            log_messages.append(f"  ⚠️ Uyarı: Total amount çevrilirken hata: {e}")
+        
+        # ✅ SADECE tutar > 0 ise transaction ekle
+        if total_amount_float > 0:
+            transaction = {
+                "gateway": payment_method if payment_method != "Bilinmiyor" else "manual",
+                "kind": "SALE",
+                "status": "SUCCESS" if financial_status == "Paid" else "PENDING",
+                "amountSet": {
+                    "shopMoney": {
+                        "amount": str(total_amount_float),  # Float'tan string'e güvenli çevrim
+                        "currencyCode": currency
+                    }
                 }
             }
-        }
-        order_data_for_creation["transactions"] = [transaction]
-        log_messages.append(f"  💳 Transaction eklendi: {transaction['gateway']} - ₺{total_amount} ({transaction['status']})")
+            order_data_for_creation["transactions"] = [transaction]
+            log_messages.append(f"  💳 Transaction eklendi:")
+            log_messages.append(f"     ├─ Gateway: {transaction['gateway']}")
+            log_messages.append(f"     ├─ Kind: {transaction['kind']}")
+            log_messages.append(f"     ├─ Status: {transaction['status']}")
+            log_messages.append(f"     ├─ Amount: {transaction['amountSet']['shopMoney']['amount']}")
+            log_messages.append(f"     └─ Currency: {transaction['amountSet']['shopMoney']['currencyCode']}")
+        else:
+            # ⚠️ Tutar 0 veya negatif - transaction ekleme
+            log_messages.append(f"  ⚠️ Uyarı: Toplam tutar 0 veya negatif (₺{total_amount_float:.2f}) - Transaction eklenmedi")
+            log_messages.append(f"  ℹ️ Shopify line item'lardan toplam tutarı otomatik hesaplayacak")
         
         # ❌ shippingLine KALDIRILDI - OrderCreateOrderInput desteklemiyor!
         # Kargo bilgisi sipariş notunda mevcut

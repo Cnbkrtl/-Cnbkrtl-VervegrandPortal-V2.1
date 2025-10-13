@@ -4,6 +4,8 @@ Shopify OrderCreateOrderInput Schema Helper
 Doğru field formatlarını sağlar
 """
 
+import logging
+
 def create_order_input_builder():
     """
     OrderCreateOrderInput için safe builder
@@ -54,9 +56,35 @@ def create_order_input_builder():
         """OrderCreateOrderTransactionInput formatında transaction oluşturur"""
         if not transaction_data:
             return None
-            
-        amount = transaction_data.get('amount', '0')
+        
+        # Amount'u al - hem eski format (amount) hem yeni format (amountSet.shopMoney.amount) destekle
+        amount = None
         currency = transaction_data.get('currency', 'TRY')
+        
+        # Yeni format: amountSet.shopMoney.amount
+        if 'amountSet' in transaction_data:
+            amount_set = transaction_data.get('amountSet', {})
+            shop_money = amount_set.get('shopMoney', {})
+            amount = shop_money.get('amount')
+            currency = shop_money.get('currencyCode', currency)
+        # Eski format: amount
+        elif 'amount' in transaction_data:
+            amount = transaction_data.get('amount')
+        
+        # ✅ Amount kontrolü - 0 veya None ise transaction oluşturma
+        if not amount:
+            logging.warning("Transaction amount boş veya 0, transaction oluşturulmadı")
+            return None
+        
+        # String'e çevir ve validate et
+        try:
+            amount_float = float(str(amount).strip().replace(',', '.'))
+            if amount_float <= 0:
+                logging.warning(f"Transaction amount 0 veya negatif: {amount_float}, transaction oluşturulmadı")
+                return None
+        except (ValueError, TypeError) as e:
+            logging.error(f"Transaction amount parse hatası: {amount} - {e}")
+            return None
         
         transaction = {
             "gateway": transaction_data.get('gateway', 'manual'),
@@ -64,14 +92,13 @@ def create_order_input_builder():
             "status": transaction_data.get('status', 'SUCCESS')
         }
         
-        # amountSet formatı - amount yerine
-        if amount:
-            transaction["amountSet"] = {
-                "shopMoney": {
-                    "amount": str(amount),
-                    "currencyCode": currency
-                }
+        # amountSet formatı
+        transaction["amountSet"] = {
+            "shopMoney": {
+                "amount": str(amount_float),  # Float'tan string'e güvenli çevrim
+                "currencyCode": currency
             }
+        }
         
         return transaction
     
